@@ -162,7 +162,7 @@ app.use("/uploads", express.static(uploadsPath));
 // API Root Status
 app.get("/", (req, res) => {
   res.json({
-    message: "Morihix Digital Backend API",
+    message: "Assudani's WP Automation Backend API",
     status: "running",
     timestamp: new Date().toISOString(),
     endpoints: {
@@ -200,20 +200,28 @@ const { initBullMQ } = require("./services/campaignProcessor");
 const db = require("./db");
 initBullMQ(io);
 
-// Auto-migrate any legacy localhost media URLs and ensure TEXT capacity
-db.query(`
-  ALTER TABLE messages ALTER COLUMN media_url TYPE TEXT;
-  ALTER TABLE campaigns ALTER COLUMN media_url TYPE TEXT;
-  UPDATE media_assets SET media_url = REPLACE(media_url, 'http://localhost:5001', 'https://morihix-wp.piyushassudani.in') WHERE media_url LIKE 'http://localhost:5001%';
-  UPDATE campaigns SET media_url = REPLACE(media_url, 'http://localhost:5001', 'https://morihix-wp.piyushassudani.in') WHERE media_url LIKE 'http://localhost:5001%';
-  UPDATE messages SET media_url = REPLACE(media_url, 'http://localhost:5001', 'https://morihix-wp.piyushassudani.in') WHERE media_url LIKE 'http://localhost:5001%';
-`).catch((err) => {
+// Auto-migrate any legacy media URLs and ensure TEXT capacity
+const configuredBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
+const migrationQuery = configuredBaseUrl
+  ? `
+    ALTER TABLE messages ALTER COLUMN media_url TYPE TEXT;
+    ALTER TABLE campaigns ALTER COLUMN media_url TYPE TEXT;
+    UPDATE media_assets SET media_url = REPLACE(media_url, 'https://morihix-wp.piyushassudani.in', '${configuredBaseUrl}') WHERE media_url LIKE '%morihix-wp.piyushassudani.in%';
+    UPDATE campaigns SET media_url = REPLACE(media_url, 'https://morihix-wp.piyushassudani.in', '${configuredBaseUrl}') WHERE media_url LIKE '%morihix-wp.piyushassudani.in%';
+    UPDATE messages SET media_url = REPLACE(media_url, 'https://morihix-wp.piyushassudani.in', '${configuredBaseUrl}') WHERE media_url LIKE '%morihix-wp.piyushassudani.in%';
+  `
+  : `
+    ALTER TABLE messages ALTER COLUMN media_url TYPE TEXT;
+    ALTER TABLE campaigns ALTER COLUMN media_url TYPE TEXT;
+  `;
+
+db.query(migrationQuery).catch((err) => {
   console.warn("⚠️ Media URL legacy migration notice:", err.message);
 });
 
 // Server Listen
 server.listen(PORT, () => {
-  console.log(`🚀 Morihix Digital Backend running on http://localhost:${PORT}`);
+  console.log(`🚀 Assudani's WP Automation Backend running on http://localhost:${PORT}`);
   console.log(`📦 Environment: ${process.env.NODE_ENV || "development"}`);
   console.log(`🔌 WebSocket server ready`);
   console.log(`📡 Webhook endpoint: http://localhost:${PORT}/webhook`);

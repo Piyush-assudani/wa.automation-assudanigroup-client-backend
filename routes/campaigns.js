@@ -103,7 +103,8 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
 
     let media_id = incomingMediaId || null;
     let media_type = null;
-    let media_url = incomingMediaUrl ? incomingMediaUrl.replace(/http:\/\/localhost:\d+/g, "https://morihix-wp.piyushassudani.in") : null;
+    const publicBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
+    let media_url = incomingMediaUrl ? (publicBaseUrl ? incomingMediaUrl.replace(/http:\/\/localhost:\d+/g, publicBaseUrl) : incomingMediaUrl) : null;
 
     // Only upload and attach media header if the template actually expects a media header (or if template lookup failed)
     if (req.file && (!templateFetched || templateRequiresMediaHeader)) {
@@ -236,9 +237,10 @@ router.get("/", async (req, res) => {
       GROUP BY c.id
       ORDER BY c.created_at DESC`
     );
+    const publicBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
     const rows = result.rows.map(c => ({
       ...c,
-      media_url: c.media_url?.replace(/http:\/\/localhost:\d+/g, "https://morihix-wp.piyushassudani.in") || c.media_url,
+      media_url: (publicBaseUrl && c.media_url) ? c.media_url.replace(/http:\/\/localhost:\d+/g, publicBaseUrl) : c.media_url,
     }));
     res.json(rows);
   } catch (err) {
@@ -275,8 +277,9 @@ router.get("/:id", async (req, res) => {
     );
 
     const camp = campaignResult.rows[0];
-    if (camp && camp.media_url) {
-      camp.media_url = camp.media_url.replace(/http:\/\/localhost:\d+/g, "https://morihix-wp.piyushassudani.in");
+    const publicBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
+    if (camp && camp.media_url && publicBaseUrl) {
+      camp.media_url = camp.media_url.replace(/http:\/\/localhost:\d+/g, publicBaseUrl);
     }
 
     res.json({

@@ -1,6 +1,6 @@
-# Morihix Digital Backend
+# Assudani's WP Automation Backend
 
-This is the high-performance backend service for Morihix Digital. It provides RESTful APIs, real-time Socket.IO events, and webhook handling for managing WhatsApp campaigns, contacts, media, and real-time messaging using the official WhatsApp Cloud API.
+This is the high-performance backend service for Assudani's WP Automation. It provides RESTful APIs, real-time Socket.IO events, and webhook handling for managing WhatsApp campaigns, contacts, media, and real-time messaging using the official WhatsApp Cloud API.
 
 ## Features
 
@@ -32,7 +32,7 @@ This is the high-performance backend service for Morihix Digital. It provides RE
    WHATSAPP_BUSINESS_ACCOUNT_ID=...
    META_ACCESS_TOKEN=...
    META_API_VERSION=v17.0
-   WEBHOOK_VERIFY_TOKEN=morihix_verify_token
+   WEBHOOK_VERIFY_TOKEN=assudani_wp_verify_token_2026
    
    REDIS_URL=redis://localhost:6379
    FRONTEND_URL=http://localhost:3000

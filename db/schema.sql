@@ -1,4 +1,4 @@
--- Morihix Digital Database Schema
+-- Assudani's WP Automation Database Schema
 -- Run with: npm run migrate
 
 -- Enable UUID extension

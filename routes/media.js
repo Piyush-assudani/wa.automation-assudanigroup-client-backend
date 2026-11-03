@@ -27,9 +27,10 @@ router.get("/", async (req, res) => {
     const result = await db.query(
       `SELECT * FROM media_assets ORDER BY created_at DESC`
     );
+    const publicBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
     const rows = result.rows.map(row => ({
       ...row,
-      media_url: row.media_url?.replace(/http:\/\/localhost:\d+/g, "https://morihix-wp.piyushassudani.in") || row.media_url,
+      media_url: (publicBaseUrl && row.media_url) ? row.media_url.replace(/http:\/\/localhost:\d+/g, publicBaseUrl) : row.media_url,
     }));
     res.json(rows);
   } catch (err) {

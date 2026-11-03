@@ -408,7 +408,8 @@ const createTemplate = async (
           sampleName = sampleFile.originalname || "sample";
         } else if (sampleUrl && typeof sampleUrl === "string") {
           try {
-            const normalizedUrl = sampleUrl.replace(/http:\/\/localhost:\d+/g, "https://morihix-wp.piyushassudani.in");
+            const publicBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
+            const normalizedUrl = publicBaseUrl ? sampleUrl.replace(/http:\/\/localhost:\d+/g, publicBaseUrl) : sampleUrl;
             const match = normalizedUrl.match(/\/uploads\/([^/]+)\/([^/?#]+)/);
             if (match) {
               const localPath = path.join(process.cwd(), "uploads", match[1], match[2]);

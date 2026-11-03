@@ -98,9 +98,10 @@ router.get("/:contactId", async (req, res) => {
       ? Date.now() - new Date(lastInboundAt).getTime() < 24 * 60 * 60 * 1000
       : false;
 
+    const publicBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
     const normalizedMessages = messagesResult.rows.map(m => ({
       ...m,
-      media_url: m.media_url?.replace(/http:\/\/localhost:\d+/g, "https://morihix-wp.piyushassudani.in") || m.media_url,
+      media_url: (publicBaseUrl && m.media_url) ? m.media_url.replace(/http:\/\/localhost:\d+/g, publicBaseUrl) : m.media_url,
     }));
 
     res.json({

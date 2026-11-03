@@ -78,6 +78,11 @@ web_modules/
 .env.production
 .env.local
 
+# Server uploads
+uploads/
+uploads/*
+!uploads/.gitkeep
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache
