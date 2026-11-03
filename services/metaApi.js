@@ -509,13 +509,20 @@ const createTemplate = async (
   }
 };
 
-const getAccountHealth = async () => {
-  const { apiBase, phoneId, token } = getMetaConfig();
+const getAccountHealth = async (customPhoneId = null, customToken = null) => {
+  let { apiBase, phoneId, token } = getMetaConfig();
+  if (customPhoneId && customToken) {
+    phoneId = customPhoneId;
+    token = customToken;
+  } else if (typeof customPhoneId === "object" && customPhoneId !== null) {
+    phoneId = customPhoneId.phoneId || customPhoneId.meta_phone_number_id || phoneId;
+    token = customPhoneId.token || customPhoneId.meta_access_token || token;
+  }
 
   if (!token || !phoneId) {
     return {
       success: false,
-      error: "Meta API credentials not set in backend .env.",
+      error: "Meta API credentials not provided or configured.",
     };
   }
 

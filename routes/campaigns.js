@@ -153,11 +153,26 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
       return res.status(400).json({ error: "Selected contact lists have no recipients or are empty." });
     }
 
+    const effectiveUserId = req.targetUserId || req.user?.id || null;
+    const { scheduled_at } = req.body;
+    const isScheduled = scheduled_at && new Date(scheduled_at) > new Date();
+    const initialStatus = isScheduled ? "scheduled" : "completed";
+
     const campaignResult = await db.query(
-      `INSERT INTO campaigns (name, template_name, contact_list_id, media_id, media_type, media_url, total_sent)
-       VALUES ($1, $2, $3, $4, $5, $6, 0)
+      `INSERT INTO campaigns (name, template_name, contact_list_id, media_id, media_type, media_url, total_sent, user_id, scheduled_at, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9)
        RETURNING *`,
-      [name.trim().slice(0, 255), template_name.trim(), parsedListIds[0], media_id, media_type, media_url]
+      [
+        name.trim().slice(0, 255),
+        template_name.trim(),
+        parsedListIds[0],
+        media_id,
+        media_type,
+        media_url,
+        effectiveUserId,
+        isScheduled ? new Date(scheduled_at).toISOString() : null,
+        initialStatus,
+      ]
     );
     const campaign = campaignResult.rows[0];
 
@@ -182,19 +197,21 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
       };
     });
 
-    const io = req.app.get("io");
-    const customMetaConfig = await getUserMetaConfig(req);
-    await processCampaign(
-      messages,
-      campaign.id,
-      template_name.trim(),
-      resolvedLanguageCode,
-      io,
-      media_id,
-      media_type,
-      media_url,
-      customMetaConfig
-    );
+    if (!isScheduled) {
+      const io = req.app.get("io");
+      const customMetaConfig = await getUserMetaConfig(req);
+      await processCampaign(
+        messages,
+        campaign.id,
+        template_name.trim(),
+        resolvedLanguageCode,
+        io,
+        media_id,
+        media_type,
+        media_url,
+        customMetaConfig
+      );
+    }
 
     // Keep history clean: automatically keep the last 100 campaigns
     db.query(
@@ -207,12 +224,16 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
     ).catch(() => {});
 
     res.status(201).json({
-      message: "Campaign launched and queued for delivery",
+      message: isScheduled
+        ? `Campaign successfully scheduled for ${new Date(scheduled_at).toLocaleString()}`
+        : "Campaign launched and queued for delivery",
       campaign: {
         id: campaign.id,
         name: campaign.name,
         template_name: campaign.template_name,
         total_recipients: messages.length,
+        scheduled_at: campaign.scheduled_at,
+        status: campaign.status,
         created_at: campaign.created_at,
       },
     });
@@ -224,10 +245,18 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
 
 /**
  * GET /api/campaigns
- * List all campaigns with aggregate delivery metrics
+ * List all campaigns with aggregate delivery metrics (scoped to active tenant)
  */
 router.get("/", async (req, res) => {
   try {
+    const effectiveUserId = req.targetUserId || (req.user?.role !== "master_admin" ? req.user?.id : null);
+    let whereClause = "";
+    let params = [];
+    if (effectiveUserId) {
+      whereClause = "WHERE c.user_id = $1";
+      params.push(effectiveUserId);
+    }
+
     const result = await db.query(
       `SELECT
         c.*,
@@ -237,8 +266,10 @@ router.get("/", async (req, res) => {
         COUNT(CASE WHEN m.status = 'failed' THEN 1 END) as total_failed
       FROM campaigns c
       LEFT JOIN messages m ON m.campaign_id = c.id
+      ${whereClause}
       GROUP BY c.id
-      ORDER BY c.created_at DESC`
+      ORDER BY c.created_at DESC`,
+      params
     );
     const publicBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
     const rows = result.rows.map(c => ({

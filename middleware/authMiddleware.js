@@ -14,10 +14,15 @@ const authenticate = (req, res, next) => {
     const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
 
-    // SaaS Multi-tenant client switching for Master Admin / Admin
+    // SaaS Multi-tenant client switching strictly for Master Admin ONLY (piyushassudani)
+    const isMaster = req.user.role === "master_admin" || (req.user.username && req.user.username.toLowerCase() === "piyushassudani");
     const targetClientId = req.headers["x-client-id"];
-    if (targetClientId && (req.user.role === "master_admin" || req.user.role === "admin")) {
+
+    if (targetClientId && isMaster) {
       req.targetUserId = targetClientId;
+    } else if (req.user.parent_client_id) {
+      // Sub-user/team member operates strictly within their parent client's workspace
+      req.targetUserId = req.user.parent_client_id;
     } else {
       req.targetUserId = req.user.id;
     }
@@ -29,15 +34,17 @@ const authenticate = (req, res, next) => {
 };
 
 const requireMasterAdmin = (req, res, next) => {
-  if (!req.user || req.user.role !== "master_admin") {
+  const isMaster = req.user && (req.user.role === "master_admin" || (req.user.username && req.user.username.toLowerCase() === "piyushassudani"));
+  if (!isMaster) {
     return res.status(403).json({ error: "Access denied. Master Admin privileges required." });
   }
   next();
 };
 
 const requireAdmin = (req, res, next) => {
-  if (!req.user || (req.user.role !== "admin" && req.user.role !== "master_admin")) {
-    return res.status(403).json({ error: "Access denied. Admin privileges required." });
+  const isMaster = req.user && (req.user.role === "master_admin" || (req.user.username && req.user.username.toLowerCase() === "piyushassudani"));
+  if (!isMaster) {
+    return res.status(403).json({ error: "Access denied. Master Admin privileges required." });
   }
   next();
 };

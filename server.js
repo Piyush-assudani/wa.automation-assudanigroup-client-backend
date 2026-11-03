@@ -200,8 +200,10 @@ app.use((err, req, res, next) => {
 // Campaign Processor & Worker Initialization
 // ============================================
 const { initBullMQ } = require("./services/campaignProcessor");
+const { startCampaignScheduler } = require("./services/campaignScheduler");
 const db = require("./db");
 initBullMQ(io);
+startCampaignScheduler(io);
 
 // Auto-migrate any legacy media URLs and ensure TEXT capacity
 const configuredBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");

@@ -31,12 +31,22 @@ const upload = multer({
  */
 router.get("/", async (req, res) => {
   try {
+    const effectiveUserId = req.targetUserId || (req.user?.role !== "master_admin" ? req.user?.id : null);
+    let whereClause = "";
+    let params = [];
+    if (effectiveUserId) {
+      whereClause = "WHERE cl.user_id = $1";
+      params.push(effectiveUserId);
+    }
+
     const result = await db.query(
       `SELECT cl.*, COUNT(clm.contact_id) as member_count
        FROM contact_lists cl
        LEFT JOIN contact_list_members clm ON cl.id = clm.list_id
+       ${whereClause}
        GROUP BY cl.id
-       ORDER BY cl.created_at DESC`
+       ORDER BY cl.created_at DESC`,
+      params
     );
     res.json(result.rows);
   } catch (err) {
@@ -171,9 +181,10 @@ router.post("/", upload.single("file"), async (req, res) => {
     }
     const uniqueContacts = Array.from(uniqueMap.values());
 
+    const effectiveUserId = req.targetUserId || req.user?.id || null;
     const listResult = await db.query(
-      `INSERT INTO contact_lists (name, file_url) VALUES ($1, $2) RETURNING *`,
-      [name.trim().slice(0, 255), fileUrl]
+      `INSERT INTO contact_lists (name, file_url, user_id) VALUES ($1, $2, $3) RETURNING *`,
+      [name.trim().slice(0, 255), fileUrl, effectiveUserId]
     );
     const list = listResult.rows[0];
 
@@ -181,13 +192,14 @@ router.post("/", upload.single("file"), async (req, res) => {
     for (const contact of uniqueContacts) {
       try {
         const contactResult = await db.query(
-          `INSERT INTO contacts (phone_number, name, city)
-           VALUES ($1, $2, $3)
+          `INSERT INTO contacts (phone_number, name, city, user_id)
+           VALUES ($1, $2, $3, $4)
            ON CONFLICT (phone_number) DO UPDATE SET 
              name = COALESCE(NULLIF(EXCLUDED.name, ''), contacts.name),
-             city = COALESCE(NULLIF(EXCLUDED.city, ''), contacts.city)
+             city = COALESCE(NULLIF(EXCLUDED.city, ''), contacts.city),
+             user_id = COALESCE(contacts.user_id, EXCLUDED.user_id)
            RETURNING id`,
-          [contact.phone, contact.name, contact.city]
+          [contact.phone, contact.name, contact.city, effectiveUserId]
         );
 
         const contactId = contactResult.rows[0].id;

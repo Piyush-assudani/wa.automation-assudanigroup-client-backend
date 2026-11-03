@@ -49,10 +49,10 @@ router.get("/channel-config", async (req, res) => {
 
     // Company default configuration (from environment)
     const companyConfig = {
-      phone_number: "+91 82339 57004",
+      phone_number: process.env.COMPANY_WHATSAPP_NUMBER || process.env.META_DISPLAY_PHONE_NUMBER || "",
       phone_id: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
       waba_id: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "",
-      verified_name: "Assudani WA Automations (Central Company)",
+      verified_name: "Assudani WA Automations (Company Default)",
     };
 
     return res.json({
@@ -90,25 +90,27 @@ router.post("/channel-config", async (req, res) => {
     let verifiedName = null;
     let displayPhone = null;
 
-    // If personal mode with new credentials, test against Meta Graph API
-    if (mode === "personal" && meta_phone_number_id && meta_access_token) {
+    const cleanPhoneId = meta_phone_number_id && String(meta_phone_number_id).trim() !== "" ? String(meta_phone_number_id).trim() : null;
+    const cleanWabaId = meta_waba_id && String(meta_waba_id).trim() !== "" ? String(meta_waba_id).trim() : null;
+    const cleanToken = meta_access_token && String(meta_access_token).trim() !== "" ? String(meta_access_token).trim() : null;
+
+    // If personal mode with new credentials, test against Meta Graph API gracefully
+    if (mode === "personal" && cleanPhoneId && cleanToken) {
       try {
-        const metaRes = await getAccountHealth(meta_phone_number_id.trim(), meta_access_token.trim());
+        const metaRes = await getAccountHealth(cleanPhoneId, cleanToken);
         if (metaRes.success && metaRes.data) {
           verifiedName = metaRes.data.verified_name || null;
           displayPhone = metaRes.data.display_phone_number || null;
         }
       } catch (metaErr) {
-        return res.status(400).json({
-          error: `Meta validation failed: ${metaErr.response?.data?.error?.message || metaErr.message}`,
-        });
+        console.warn("Soft check on Meta health failed:", metaErr.message);
       }
     }
 
     let updateQuery;
     let params;
 
-    if (meta_access_token && meta_access_token.trim() !== "") {
+    if (cleanToken) {
       updateQuery = `
         UPDATE public.users 
         SET whatsapp_mode = $1, 
@@ -118,13 +120,13 @@ router.post("/channel-config", async (req, res) => {
             meta_verified_name = COALESCE($5, meta_verified_name),
             meta_display_phone_number = COALESCE($6, meta_display_phone_number)
         WHERE id = $7
-        RETURNING id, username, role, whatsapp_mode, meta_display_phone_number;
+        RETURNING id, username, role, whatsapp_mode, meta_display_phone_number, meta_verified_name;
       `;
       params = [
         mode,
-        meta_phone_number_id ? meta_phone_number_id.trim() : null,
-        meta_waba_id ? meta_waba_id.trim() : null,
-        meta_access_token.trim(),
+        cleanPhoneId,
+        cleanWabaId,
+        cleanToken,
         verifiedName,
         displayPhone,
         effectiveUserId,
@@ -132,16 +134,16 @@ router.post("/channel-config", async (req, res) => {
     } else {
       updateQuery = `
         UPDATE public.users 
-        SET whatsapp_mode = $1,
+        SET whatsapp_mode = $1, 
             meta_phone_number_id = COALESCE($2, meta_phone_number_id),
             meta_waba_id = COALESCE($3, meta_waba_id)
         WHERE id = $4
-        RETURNING id, username, role, whatsapp_mode, meta_display_phone_number;
+        RETURNING id, username, role, whatsapp_mode, meta_display_phone_number, meta_verified_name;
       `;
       params = [
         mode,
-        meta_phone_number_id ? meta_phone_number_id.trim() : null,
-        meta_waba_id ? meta_waba_id.trim() : null,
+        cleanPhoneId,
+        cleanWabaId,
         effectiveUserId,
       ];
     }
@@ -149,12 +151,12 @@ router.post("/channel-config", async (req, res) => {
     const updated = await db.query(updateQuery, params);
 
     return res.json({
-      message: `Sender channel successfully switched to ${mode === 'company' ? 'Company Central Number' : 'Personal Meta Cloud API'}!`,
+      message: `WhatsApp channel successfully saved and set to ${mode === 'company' ? 'Company Central Number' : 'Personal Meta Cloud API'}!`,
       user: updated.rows[0],
     });
   } catch (err) {
     console.error("Save channel config error:", err);
-    return res.status(500).json({ error: "Failed to update channel settings." });
+    return res.status(500).json({ error: "Failed to update channel settings: " + err.message });
   }
 });
 
@@ -206,6 +208,7 @@ router.get("/", requireMasterAdmin, async (req, res) => {
         id, 
         username, 
         role, 
+        parent_client_id,
         whatsapp_mode, 
         meta_phone_number_id, 
         meta_waba_id,
@@ -238,6 +241,7 @@ router.post("/", requireMasterAdmin, async (req, res) => {
     username,
     password,
     role = "client",
+    parent_client_id = null,
     whatsapp_mode = "company",
     meta_phone_number_id,
     meta_waba_id,
@@ -288,6 +292,7 @@ router.post("/", requireMasterAdmin, async (req, res) => {
         username,
         password,
         role,
+        parent_client_id,
         whatsapp_mode,
         meta_phone_number_id,
         meta_waba_id,
@@ -296,12 +301,13 @@ router.post("/", requireMasterAdmin, async (req, res) => {
         meta_display_phone_number,
         status,
         created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', $10)
-      RETURNING id, username, role, whatsapp_mode, meta_display_phone_number, created_at;
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11)
+      RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_display_phone_number, created_at;
     `, [
       cleanUser,
       hashedPassword,
       role === "master_admin" ? "admin" : role, // Prevent creating another master_admin
+      parent_client_id || null,
       whatsapp_mode,
       meta_phone_number_id ? meta_phone_number_id.trim() : null,
       meta_waba_id ? meta_waba_id.trim() : null,
@@ -437,6 +443,116 @@ router.delete("/:id", requireMasterAdmin, async (req, res) => {
   } catch (err) {
     console.error("Delete user error:", err);
     return res.status(500).json({ error: "Failed to delete user." });
+  }
+});
+
+// ============================================
+// TEAM MEMBERS / SUB-LOGINS UNDER A CLIENT
+// ============================================
+
+/**
+ * GET /api/users/team
+ * Returns sub-user team logins under the active client organization
+ */
+router.get("/team", async (req, res) => {
+  try {
+    const isMaster = req.user.role === "master_admin" || (req.user.username && req.user.username.toLowerCase() === "piyushassudani");
+    const parentId = isMaster
+      ? (req.targetUserId || req.user.id)
+      : (req.user.parent_client_id || req.user.id);
+
+    const result = await db.query(
+      `SELECT id, username, role, status, created_at, parent_client_id 
+       FROM public.users 
+       WHERE parent_client_id = $1 
+       ORDER BY created_at ASC`,
+      [parentId]
+    );
+
+    return res.json({ team: result.rows });
+  } catch (err) {
+    console.error("Fetch team error:", err);
+    return res.status(500).json({ error: "Failed to load team members." });
+  }
+});
+
+/**
+ * POST /api/users/team
+ * Creates a sub-user login under the client organization
+ */
+router.post("/team", async (req, res) => {
+  const { username, password } = req.body || {};
+  const cleanUser = username?.trim();
+  const cleanPass = password?.trim();
+
+  if (!cleanUser || !cleanPass) {
+    return res.status(400).json({ error: "Username and password are required." });
+  }
+  if (cleanPass.length < 4) {
+    return res.status(400).json({ error: "Password must be at least 4 characters." });
+  }
+
+  try {
+    const isMaster = req.user.role === "master_admin" || (req.user.username && req.user.username.toLowerCase() === "piyushassudani");
+    const parentId = isMaster
+      ? (req.body.parent_client_id || req.targetUserId || req.user.id)
+      : (req.user.parent_client_id || req.user.id);
+
+    // Verify username uniqueness
+    const check = await db.query(
+      "SELECT id FROM public.users WHERE LOWER(TRIM(username)) = LOWER(TRIM($1))",
+      [cleanUser]
+    );
+    if (check.rows.length > 0) {
+      return res.status(409).json({ error: `Username "${cleanUser}" already exists.` });
+    }
+
+    const hashedPassword = await bcrypt.hash(cleanPass, 10);
+    const result = await db.query(
+      `INSERT INTO public.users (username, password, role, parent_client_id, status, created_by)
+       VALUES ($1, $2, 'user', $3, 'active', $4)
+       RETURNING id, username, role, parent_client_id, created_at`,
+      [cleanUser, hashedPassword, parentId, req.user.username]
+    );
+
+    return res.status(201).json({
+      message: `Team member login "${cleanUser}" created successfully!`,
+      member: result.rows[0],
+    });
+  } catch (err) {
+    console.error("Create team error:", err);
+    return res.status(500).json({ error: "Failed to create team member: " + err.message });
+  }
+});
+
+/**
+ * DELETE /api/users/team/:id
+ * Deletes a sub-user team login under this client
+ */
+router.delete("/team/:id", async (req, res) => {
+  try {
+    const memberId = req.params.id;
+    const isMaster = req.user.role === "master_admin" || (req.user.username && req.user.username.toLowerCase() === "piyushassudani");
+    const parentId = isMaster ? null : (req.user.parent_client_id || req.user.id);
+
+    if (parentId) {
+      const del = await db.query(
+        "DELETE FROM public.users WHERE id = $1 AND parent_client_id = $2 RETURNING id, username",
+        [memberId, parentId]
+      );
+      if (del.rows.length === 0) {
+        return res.status(404).json({ error: "Team member not found or access denied." });
+      }
+      return res.json({ message: `Team member "${del.rows[0].username}" removed.` });
+    } else {
+      const del = await db.query(
+        "DELETE FROM public.users WHERE id = $1 AND role != 'master_admin' RETURNING id, username",
+        [memberId]
+      );
+      return res.json({ message: `Team member "${del.rows[0]?.username}" removed.` });
+    }
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to delete team member." });
   }
 });
 

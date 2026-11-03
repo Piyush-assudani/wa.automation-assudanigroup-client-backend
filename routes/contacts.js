@@ -23,12 +23,21 @@ const cleanPhoneNumber = (raw) => {
  */
 router.get("/", async (req, res) => {
   try {
+    const effectiveUserId = req.targetUserId || (req.user?.role !== "master_admin" ? req.user?.id : null);
+    let whereClause = "";
+    let params = [];
+    if (effectiveUserId) {
+      whereClause = "WHERE c.user_id = $1";
+      params.push(effectiveUserId);
+    }
+
     const result = await db.query(
       `SELECT
         c.id,
         c.phone_number,
         c.name,
         c.created_at,
+        c.user_id,
         m.message_body as last_message,
         m.direction as last_message_direction,
         m.timestamp as last_message_time,
@@ -56,7 +65,9 @@ router.get("/", async (req, res) => {
         ORDER BY timestamp DESC NULLS LAST
         LIMIT 1
       ) m ON true
-      ORDER BY m.timestamp DESC NULLS LAST`
+      ${whereClause}
+      ORDER BY m.timestamp DESC NULLS LAST`,
+      params
     );
     res.json(result.rows);
   } catch (err) {
@@ -126,12 +137,13 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "A contact with this phone number already exists." });
     }
 
+    const effectiveUserId = req.targetUserId || req.user?.id || null;
     const safeName = (typeof name === "string" ? name.trim().slice(0, 255) : "") || "Unknown";
     const safeCity = typeof city === "string" ? city.trim().slice(0, 255) : "";
 
     const result = await db.query(
-      "INSERT INTO contacts (name, phone_number, city) VALUES ($1, $2, $3) RETURNING *",
-      [safeName, cleanedPhone, safeCity]
+      "INSERT INTO contacts (name, phone_number, city, user_id) VALUES ($1, $2, $3, $4) RETURNING *",
+      [safeName, cleanedPhone, safeCity, effectiveUserId]
     );
 
     res.status(201).json({ message: "Contact added successfully", contact: result.rows[0] });
