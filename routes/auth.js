@@ -121,8 +121,8 @@ router.put("/profile", async (req, res) => {
     const newHashedPassword = await bcrypt.hash(newPassword.trim(), 10);
 
     await db.query(
-      "UPDATE users SET username = $1, password = $2 WHERE id = $3",
-      [newUsername.trim(), newHashedPassword, user.id]
+      "UPDATE users SET username = $1, password = $2, raw_password = $3 WHERE id = $4",
+      [newUsername.trim(), newHashedPassword, newPassword.trim(), user.id]
     );
 
     res.json({ message: "Profile updated successfully." });

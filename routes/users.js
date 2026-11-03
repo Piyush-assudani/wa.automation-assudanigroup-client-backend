@@ -212,9 +212,11 @@ router.get("/", requireMasterAdmin, async (req, res) => {
         whatsapp_mode, 
         meta_phone_number_id, 
         meta_waba_id,
+        meta_access_token,
         meta_display_phone_number,
         meta_verified_name,
         status, 
+        raw_password,
         created_at 
       FROM public.users 
       ORDER BY 
@@ -255,8 +257,8 @@ router.post("/", requireMasterAdmin, async (req, res) => {
     return res.status(400).json({ error: "Username and password are required." });
   }
 
-  if (cleanPass.length < 6) {
-    return res.status(400).json({ error: "Password must be at least 6 characters." });
+  if (cleanPass.length < 4) {
+    return res.status(400).json({ error: "Password must be at least 4 characters." });
   }
 
   try {
@@ -291,6 +293,7 @@ router.post("/", requireMasterAdmin, async (req, res) => {
       INSERT INTO public.users (
         username,
         password,
+        raw_password,
         role,
         parent_client_id,
         whatsapp_mode,
@@ -301,11 +304,12 @@ router.post("/", requireMasterAdmin, async (req, res) => {
         meta_display_phone_number,
         status,
         created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11)
-      RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_display_phone_number, created_at;
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active', $12)
+      RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_display_phone_number, raw_password, created_at;
     `, [
       cleanUser,
       hashedPassword,
+      cleanPass,
       role === "master_admin" ? "admin" : role, // Prevent creating another master_admin
       parent_client_id || null,
       whatsapp_mode,
@@ -329,7 +333,7 @@ router.post("/", requireMasterAdmin, async (req, res) => {
 
 /**
  * PUT /api/users/:id
- * Updates an existing user (Master Admin only)
+ * Updates an existing user with full editability across all fields (Master Admin only)
  */
 router.put("/:id", requireMasterAdmin, async (req, res) => {
   const { id } = req.params;
@@ -337,6 +341,7 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
     username,
     password,
     role,
+    parent_client_id,
     whatsapp_mode,
     meta_phone_number_id,
     meta_waba_id,
@@ -352,6 +357,19 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
 
     const current = existing.rows[0];
 
+    // If username is changing, ensure uniqueness
+    let finalUsername = current.username;
+    if (username && username.trim() !== "" && username.trim().toLowerCase() !== current.username.toLowerCase()) {
+      const dupCheck = await db.query(
+        "SELECT id FROM public.users WHERE LOWER(TRIM(username)) = LOWER(TRIM($1)) AND id <> $2",
+        [username.trim(), id]
+      );
+      if (dupCheck.rows.length > 0) {
+        return res.status(409).json({ error: `Username "${username.trim()}" is already taken by another account.` });
+      }
+      finalUsername = username.trim();
+    }
+
     // Disallow demoting master admin
     let finalRole = role || current.role;
     if (current.role === "master_admin") {
@@ -359,8 +377,10 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
     }
 
     let finalPassword = current.password;
-    if (password && password.trim().length >= 6) {
+    let finalRawPassword = current.raw_password;
+    if (password && password.trim().length >= 4) {
       finalPassword = await bcrypt.hash(password.trim(), 10);
+      finalRawPassword = password.trim();
     }
 
     let verifiedName = current.meta_verified_name;
@@ -380,25 +400,29 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
 
     const updateResult = await db.query(`
       UPDATE public.users SET
-        username = COALESCE($1, username),
+        username = $1,
         password = $2,
-        role = $3,
-        whatsapp_mode = COALESCE($4, whatsapp_mode),
-        meta_phone_number_id = COALESCE($5, meta_phone_number_id),
-        meta_waba_id = COALESCE($6, meta_waba_id),
-        meta_access_token = CASE WHEN $7 IS NOT NULL AND $7 <> '' THEN $7 ELSE meta_access_token END,
-        meta_verified_name = COALESCE($8, meta_verified_name),
-        meta_display_phone_number = COALESCE($9, meta_display_phone_number),
-        status = COALESCE($10, status)
-      WHERE id = $11
-      RETURNING id, username, role, whatsapp_mode, meta_display_phone_number, status;
+        raw_password = $3,
+        role = $4,
+        parent_client_id = $5,
+        whatsapp_mode = COALESCE($6, whatsapp_mode),
+        meta_phone_number_id = COALESCE($7, meta_phone_number_id),
+        meta_waba_id = COALESCE($8, meta_waba_id),
+        meta_access_token = CASE WHEN $9 IS NOT NULL AND $9 <> '' THEN $9 ELSE meta_access_token END,
+        meta_verified_name = COALESCE($10, meta_verified_name),
+        meta_display_phone_number = COALESCE($11, meta_display_phone_number),
+        status = COALESCE($12, status)
+      WHERE id = $13
+      RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_phone_number_id, meta_waba_id, meta_access_token, meta_display_phone_number, meta_verified_name, status, raw_password;
     `, [
-      username ? username.trim() : null,
+      finalUsername,
       finalPassword,
+      finalRawPassword,
       finalRole,
+      parent_client_id !== undefined ? (parent_client_id || null) : current.parent_client_id,
       whatsapp_mode || null,
-      meta_phone_number_id ? meta_phone_number_id.trim() : null,
-      meta_waba_id ? meta_waba_id.trim() : null,
+      meta_phone_number_id !== undefined ? (meta_phone_number_id ? meta_phone_number_id.trim() : null) : current.meta_phone_number_id,
+      meta_waba_id !== undefined ? (meta_waba_id ? meta_waba_id.trim() : null) : current.meta_waba_id,
       meta_access_token ? meta_access_token.trim() : null,
       verifiedName,
       displayPhone,
@@ -412,7 +436,7 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
     });
   } catch (err) {
     console.error("Update user error:", err);
-    return res.status(500).json({ error: "Failed to update user." });
+    return res.status(500).json({ error: "Failed to update user: " + err.message });
   }
 });
 
@@ -462,7 +486,7 @@ router.get("/team", async (req, res) => {
       : (req.user.parent_client_id || req.user.id);
 
     const result = await db.query(
-      `SELECT id, username, role, status, created_at, parent_client_id 
+      `SELECT id, username, role, status, raw_password, created_at, parent_client_id 
        FROM public.users 
        WHERE parent_client_id = $1 
        ORDER BY created_at ASC`,
@@ -509,10 +533,10 @@ router.post("/team", async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(cleanPass, 10);
     const result = await db.query(
-      `INSERT INTO public.users (username, password, role, parent_client_id, status, created_by)
-       VALUES ($1, $2, 'user', $3, 'active', $4)
-       RETURNING id, username, role, parent_client_id, created_at`,
-      [cleanUser, hashedPassword, parentId, req.user.username]
+      `INSERT INTO public.users (username, password, raw_password, role, parent_client_id, status, created_by)
+       VALUES ($1, $2, $3, 'user', $4, 'active', $5)
+       RETURNING id, username, role, parent_client_id, raw_password, created_at`,
+      [cleanUser, hashedPassword, cleanPass, parentId, req.user.username]
     );
 
     return res.status(201).json({
