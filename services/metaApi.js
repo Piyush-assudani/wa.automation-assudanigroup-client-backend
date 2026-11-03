@@ -5,19 +5,19 @@ const fs = require("fs");
 const FormData = require("form-data");
 
 /**
- * Returns dynamic Meta configuration from environment variables
+ * Returns dynamic Meta configuration from environment variables or custom user config
  */
-const getMetaConfig = () => {
-  const version = process.env.META_API_VERSION || "v17.0";
+const getMetaConfig = (customConfig = null) => {
+  const version = customConfig?.version || process.env.META_API_VERSION || "v17.0";
   const apiBase = `https://graph.facebook.com/${version}`;
-  const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const token = process.env.META_ACCESS_TOKEN;
-  const wabaId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
+  const phoneId = customConfig?.phoneId || customConfig?.meta_phone_number_id || process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const token = customConfig?.token || customConfig?.meta_access_token || process.env.META_ACCESS_TOKEN;
+  const wabaId = customConfig?.wabaId || customConfig?.meta_waba_id || process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
   return { apiBase, phoneId, token, wabaId };
 };
 
-const sendTemplateMessage = async (to, templateName, languageCode = "en_US", components = []) => {
-  const { apiBase, phoneId, token } = getMetaConfig();
+const sendTemplateMessage = async (to, templateName, languageCode = "en_US", components = [], customConfig = null) => {
+  const { apiBase, phoneId, token } = getMetaConfig(customConfig);
 
   if (!token || !phoneId) {
     return {
@@ -72,8 +72,8 @@ const sendTemplateMessage = async (to, templateName, languageCode = "en_US", com
   }
 };
 
-const sendTextMessage = async (to, text) => {
-  const { apiBase, phoneId, token } = getMetaConfig();
+const sendTextMessage = async (to, text, customConfig = null) => {
+  const { apiBase, phoneId, token } = getMetaConfig(customConfig);
 
   if (!token || !phoneId) {
     return {
@@ -113,8 +113,8 @@ const sendTextMessage = async (to, text) => {
   }
 };
 
-const sendMediaMessage = async (to, mediaUrl, type = "image") => {
-  const { apiBase, phoneId, token } = getMetaConfig();
+const sendMediaMessage = async (to, mediaUrl, type = "image", customConfig = null) => {
+  const { apiBase, phoneId, token } = getMetaConfig(customConfig);
 
   if (!token || !phoneId) {
     return {

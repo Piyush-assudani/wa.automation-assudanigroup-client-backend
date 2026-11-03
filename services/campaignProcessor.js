@@ -67,7 +67,7 @@ const initBullMQ = (io) => {
           });
         }
 
-        const result = await sendTemplateMessage(to, templateName, languageCode, components);
+        const result = await sendTemplateMessage(to, templateName, languageCode, components, job.data.customMetaConfig || null);
 
         await db.query(
           `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp)
@@ -129,7 +129,7 @@ const initBullMQ = (io) => {
 
 
 
-const processInMemory = async (messages, campaignId, templateName, languageCode, io, mediaId = null, mediaType = null, mediaUrl = null) => {
+const processInMemory = async (messages, campaignId, templateName, languageCode, io, mediaId = null, mediaType = null, mediaUrl = null, customMetaConfig = null) => {
   const DELAY_MS = 2000; 
 
   let components = [];
@@ -157,7 +157,7 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
     }
 
     try {
-      const result = await sendTemplateMessage(to, templateName, languageCode, messageComponents);
+      const result = await sendTemplateMessage(to, templateName, languageCode, messageComponents, customMetaConfig);
 
       await db.query(
         `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp)
@@ -214,9 +214,8 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
 
 
 
-const processCampaign = async (messages, campaignId, templateName, languageCode, io, mediaId = null, mediaType = null, mediaUrl = null) => {
+const processCampaign = async (messages, campaignId, templateName, languageCode, io, mediaId = null, mediaType = null, mediaUrl = null, customMetaConfig = null) => {
   if (bullmqAvailable && campaignQueue) {
-    
     console.log(`📨 Enqueueing ${messages.length} messages via BullMQ`);
     for (const msg of messages) {
       await campaignQueue.add("send-template", {
@@ -229,13 +228,12 @@ const processCampaign = async (messages, campaignId, templateName, languageCode,
         mediaType,
         mediaUrl,
         bodyParams: msg.bodyParams,
+        customMetaConfig,
       });
     }
   } else {
-    
     console.log(`📨 Processing ${messages.length} messages in-memory`);
-    
-    processInMemory(messages, campaignId, templateName, languageCode, io, mediaId, mediaType, mediaUrl).catch((err) => {
+    processInMemory(messages, campaignId, templateName, languageCode, io, mediaId, mediaType, mediaUrl, customMetaConfig).catch((err) => {
       console.error("❌ In-memory campaign processing error:", err);
     });
   }

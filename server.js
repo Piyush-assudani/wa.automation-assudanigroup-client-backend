@@ -138,9 +138,11 @@ const templateRoutes = require("./routes/templates");
 const mediaRoutes = require("./routes/media");
 const dashboardRoutes = require("./routes/dashboard");
 const privacyRoutes = require("./routes/privacy");
+const usersRoutes = require("./routes/users");
 
 app.use("/api", apiLimiter, apiRoutes);
 app.use("/api/auth", authLimiter, authRoutes);
+app.use("/api/users", usersRoutes);
 app.use("/api/contact_lists", contactListsRoutes);
 app.use("/api/contacts", contactRoutes);
 app.use("/api/messages", messageRoutes);

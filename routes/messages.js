@@ -6,6 +6,33 @@ const { sendTextMessage, sendTemplateMessage, sendMediaMessage, sendMediaById, u
 const { uploadFileToCloudinary } = require("../services/cloudinaryService");
 const multer = require("multer");
 const os = require("os");
+const jwt = require("jsonwebtoken");
+
+const getUserMetaConfig = async (req) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
+    const token = authHeader.split(" ")[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "enterprise_wp_automation_jwt_secret_2026");
+    if (!decoded || !decoded.id) return null;
+
+    const userRes = await db.query(
+      "SELECT whatsapp_mode, meta_phone_number_id, meta_access_token, meta_waba_id FROM public.users WHERE id = $1",
+      [decoded.id]
+    );
+    const user = userRes.rows[0];
+    if (user && user.whatsapp_mode === "personal" && user.meta_phone_number_id && user.meta_access_token) {
+      return {
+        phoneId: user.meta_phone_number_id,
+        token: user.meta_access_token,
+        wabaId: user.meta_waba_id,
+      };
+    }
+  } catch (err) {
+    // ignore, fall back to company default
+  }
+  return null;
+};
 
 const isValidUuid = (val) =>
   typeof val === "string" &&
@@ -208,11 +235,12 @@ router.post("/:contactId", async (req, res) => {
     const trimmedMessage = typeof message === "string" ? message.trim() : "";
     const isImage = isImageUrl(trimmedMessage);
 
+    const userMetaConfig = await getUserMetaConfig(req);
     let result;
     if (isImage) {
-      result = await sendMediaMessage(contact.phone_number, trimmedMessage, "image");
+      result = await sendMediaMessage(contact.phone_number, trimmedMessage, "image", userMetaConfig);
     } else {
-      result = await sendTextMessage(contact.phone_number, message);
+      result = await sendTextMessage(contact.phone_number, message, userMetaConfig);
     }
 
     if (!result.success) {
@@ -281,11 +309,13 @@ router.post("/:contactId/template", async (req, res) => {
     }
     const contact = contactResult.rows[0];
 
+    const userMetaConfig = await getUserMetaConfig(req);
     const result = await sendTemplateMessage(
       contact.phone_number,
       template_name.trim(),
       language_code,
-      Array.isArray(components) ? components : []
+      Array.isArray(components) ? components : [],
+      userMetaConfig
     );
 
     if (!result.success) {

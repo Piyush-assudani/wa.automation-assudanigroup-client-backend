@@ -55,7 +55,12 @@ router.post("/login", async (req, res) => {
     }
 
     const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role },
+      {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        whatsapp_mode: user.whatsapp_mode || "company",
+      },
       JWT_SECRET,
       { expiresIn: "30d" }
     );
@@ -63,7 +68,14 @@ router.post("/login", async (req, res) => {
     return res.json({
       message: "Login successful",
       token,
-      user: { id: user.id, username: user.username, role: user.role }
+      user: {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        whatsapp_mode: user.whatsapp_mode || "company",
+        meta_display_phone_number: user.meta_display_phone_number || null,
+        has_personal_meta: !!(user.meta_phone_number_id && user.meta_access_token),
+      },
     });
   } catch (error) {
     console.error("Login error:", error);

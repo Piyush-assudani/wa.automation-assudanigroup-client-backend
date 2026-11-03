@@ -7,6 +7,7 @@ const { uploadFileToCloudinary } = require("../services/cloudinaryService");
 const os = require("os");
 const path = require("path");
 const { uploadMediaToMeta, getTemplates } = require("../services/metaApi");
+const { getUserMetaConfig } = require("../middleware/authMiddleware");
 
 const isValidUuid = (val) =>
   typeof val === "string" &&
@@ -182,6 +183,7 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
     });
 
     const io = req.app.get("io");
+    const customMetaConfig = await getUserMetaConfig(req);
     await processCampaign(
       messages,
       campaign.id,
@@ -190,7 +192,8 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
       io,
       media_id,
       media_type,
-      media_url
+      media_url,
+      customMetaConfig
     );
 
     // Keep history clean: automatically keep the last 100 campaigns
