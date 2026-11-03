@@ -10,7 +10,8 @@ const HEALTH_CACHE_TTL = 30 * 1000;
 router.get("/health", (req, res) => {
   res.json({
     status: "ok",
-    app: "Assudani's WP Automation",
+    app: "Assudani WA Automations",
+    credits: "Designed and Developed by Assudani Group & piyushassudani.in",
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
   });

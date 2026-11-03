@@ -162,8 +162,9 @@ app.use("/uploads", express.static(uploadsPath));
 // API Root Status
 app.get("/", (req, res) => {
   res.json({
-    message: "Assudani's WP Automation Backend API",
+    message: "Assudani WA Automations Backend API",
     status: "running",
+    credits: "Designed and Developed by Assudani Group & piyushassudani.in",
     timestamp: new Date().toISOString(),
     endpoints: {
       health: "GET /api/health",
@@ -221,7 +222,7 @@ db.query(migrationQuery).catch((err) => {
 
 // Server Listen
 server.listen(PORT, () => {
-  console.log(`🚀 Assudani's WP Automation Backend running on http://localhost:${PORT}`);
+  console.log(`🚀 Assudani WA Automations Backend running on http://localhost:${PORT}`);
   console.log(`📦 Environment: ${process.env.NODE_ENV || "development"}`);
   console.log(`🔌 WebSocket server ready`);
   console.log(`📡 Webhook endpoint: http://localhost:${PORT}/webhook`);
