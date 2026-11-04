@@ -6,7 +6,9 @@ const { processCampaign } = require("../services/campaignProcessor");
 const { uploadFileToCloudinary } = require("../services/cloudinaryService");
 const os = require("os");
 const path = require("path");
-const { uploadMediaToMeta, getTemplates } = require("../services/metaApi");
+const xlsx = require("xlsx");
+const jwt = require("jsonwebtoken");
+const { uploadMediaToMeta, getTemplates, sendTemplateMessage } = require("../services/metaApi");
 const { getUserMetaConfig } = require("../middleware/authMiddleware");
 
 const isValidUuid = (val) =>
@@ -376,6 +378,301 @@ router.delete("/:id", async (req, res) => {
   } catch (err) {
     console.error("❌ Campaign deletion error:", err);
     res.status(500).json({ error: "Failed to delete campaign." });
+  }
+});
+
+/**
+ * POST /api/campaigns/:id/retry
+ * Retry sending failed messages (supports category-based retry or specific message IDs)
+ */
+router.post("/:id/retry", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { category, message_id, message_ids } = req.body || {};
+
+    if (!isValidUuid(id)) {
+      return res.status(400).json({ error: "Invalid campaign ID format." });
+    }
+
+    const campResult = await db.query(`SELECT * FROM campaigns WHERE id = $1`, [id]);
+    if (campResult.rows.length === 0) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+    const campaign = campResult.rows[0];
+
+    // Build query for failed messages to retry
+    let query = `
+      SELECT m.id, m.contact_id, m.error_message, c.phone_number, c.name
+      FROM messages m
+      JOIN contacts c ON m.contact_id = c.id
+      WHERE m.campaign_id = $1 AND m.status = 'failed'
+    `;
+    const params = [id];
+
+    if (message_id && isValidUuid(message_id)) {
+      query += ` AND m.id = $2`;
+      params.push(message_id);
+    } else if (Array.isArray(message_ids) && message_ids.length > 0) {
+      const validIds = message_ids.filter(isValidUuid);
+      if (validIds.length > 0) {
+        query += ` AND m.id = ANY($2::uuid[])`;
+        params.push(validIds);
+      }
+    } else if (category && category !== "all" && category !== "failed") {
+      if (category === "not-on-whatsapp") {
+        query += ` AND (LOWER(COALESCE(m.error_message, '')) LIKE '%undeliverable%' OR LOWER(COALESCE(m.error_message, '')) LIKE '%not on whatsapp%')`;
+      } else if (category === "spam-filtered") {
+        query += ` AND (LOWER(COALESCE(m.error_message, '')) LIKE '%ecosystem%' OR LOWER(COALESCE(m.error_message, '')) LIKE '%spam%' OR LOWER(COALESCE(m.error_message, '')) LIKE '%re-engagement%')`;
+      } else if (category === "rate-limit") {
+        query += ` AND (LOWER(COALESCE(m.error_message, '')) LIKE '%rate limit%' OR LOWER(COALESCE(m.error_message, '')) LIKE '%throughput%' OR LOWER(COALESCE(m.error_message, '')) LIKE '%tier%')`;
+      } else if (category === "template-mismatch") {
+        query += ` AND (LOWER(COALESCE(m.error_message, '')) LIKE '%header%' OR LOWER(COALESCE(m.error_message, '')) LIKE '%parameter%' OR LOWER(COALESCE(m.error_message, '')) LIKE '%template%')`;
+      } else if (category === "other-failed") {
+        query += ` AND NOT (LOWER(COALESCE(m.error_message, '')) LIKE ANY(ARRAY['%undeliverable%', '%not on whatsapp%', '%ecosystem%', '%spam%', '%re-engagement%', '%rate limit%', '%throughput%', '%tier%', '%header%', '%parameter%']))`;
+      }
+    }
+
+    const messagesResult = await db.query(query, params);
+    const toRetry = messagesResult.rows;
+
+    if (toRetry.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No failed recipients matched the selected criteria.",
+        retried: 0,
+        successful: 0,
+        failed: 0
+      });
+    }
+
+    const customMetaConfig = await getUserMetaConfig(req);
+
+    // Inspect template to know header/body requirements
+    let mediaType = null;
+    let hasBodyParam = false;
+    try {
+      const templates = await getTemplates(customMetaConfig);
+      const tpl = (templates || []).find((t) => t.name === campaign.template_name);
+      if (tpl?.components) {
+        const headerComponent = tpl.components.find((c) => c.type === "HEADER");
+        if (headerComponent && ["IMAGE", "VIDEO", "DOCUMENT"].includes(headerComponent.format)) {
+          mediaType = headerComponent.format.toLowerCase();
+        }
+        const bodyComp = tpl.components.find((c) => c.type === "BODY");
+        if (bodyComp?.text && /\{\{\d+\}\}/.test(bodyComp.text)) {
+          hasBodyParam = true;
+        }
+      }
+    } catch (e) {
+      console.warn("Could not inspect template for retry:", e.message);
+    }
+
+    // Fallback mediaType from URL
+    if (!mediaType && (campaign.media_url || campaign.media_id)) {
+      const urlLower = (campaign.media_url || "").toLowerCase();
+      if (urlLower.endsWith(".mp4") || urlLower.endsWith(".mov")) mediaType = "video";
+      else if (urlLower.endsWith(".pdf") || urlLower.endsWith(".doc") || urlLower.endsWith(".docx")) mediaType = "document";
+      else mediaType = "image";
+    }
+
+    let successCount = 0;
+    let failCount = 0;
+    const io = req.app.get("io");
+
+    for (const msg of toRetry) {
+      const components = [];
+      if (mediaType && (campaign.media_id || campaign.media_url)) {
+        components.push({
+          type: "header",
+          parameters: [
+            {
+              type: mediaType,
+              [mediaType]: campaign.media_id ? { id: campaign.media_id } : { link: campaign.media_url },
+            },
+          ],
+        });
+      }
+
+      if (hasBodyParam) {
+        components.push({
+          type: "body",
+          parameters: [{ type: "text", text: msg.name || "Customer" }],
+        });
+      }
+
+      try {
+        const sendRes = await sendTemplateMessage(
+          msg.phone_number,
+          campaign.template_name,
+          campaign.language_code || "en_US",
+          components,
+          customMetaConfig
+        );
+
+        if (sendRes.success) {
+          successCount++;
+          await db.query(
+            `UPDATE messages
+             SET status = 'sent', meta_message_id = $1, error_message = NULL, timestamp = NOW()
+             WHERE id = $2`,
+            [sendRes.messageId || null, msg.id]
+          );
+        } else {
+          failCount++;
+          await db.query(
+            `UPDATE messages
+             SET status = 'failed', error_message = $1, timestamp = NOW()
+             WHERE id = $2`,
+            [sendRes.error || "Meta dispatch rejected", msg.id]
+          );
+        }
+
+        if (io) {
+          io.emit("campaign_progress", {
+            campaignId: id,
+            phone: msg.phone_number,
+            success: sendRes.success,
+            error: sendRes.error || null,
+          });
+        }
+      } catch (err) {
+        failCount++;
+        await db.query(
+          `UPDATE messages SET status = 'failed', error_message = $1, timestamp = NOW() WHERE id = $2`,
+          [err.message || "Retry execution error", msg.id]
+        );
+      }
+    }
+
+    if (successCount > 0) {
+      await db.query(`UPDATE campaigns SET total_sent = total_sent + $1 WHERE id = $2`, [successCount, id]);
+    }
+
+    return res.json({
+      success: true,
+      message: `Retried ${toRetry.length} recipients: ${successCount} successfully resent, ${failCount} failed.`,
+      retried: toRetry.length,
+      successful: successCount,
+      failed: failCount,
+    });
+  } catch (err) {
+    console.error("❌ Retry campaign error:", err);
+    res.status(500).json({ error: "Failed to retry campaign messages." });
+  }
+});
+
+/**
+ * GET /api/campaigns/:id/export
+ * Export all campaign recipient delivery analytics to Excel (.xlsx)
+ * Strictly restricted to Admin & Master Admin
+ */
+router.get("/:id/export", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!isValidUuid(id)) {
+      return res.status(400).json({ error: "Invalid campaign ID format." });
+    }
+
+    // Role verification (Admin / Master Admin ONLY)
+    const token = req.headers.authorization?.startsWith("Bearer ")
+      ? req.headers.authorization.split(" ")[1]
+      : req.query.token;
+
+    let user = null;
+    if (token) {
+      try {
+        const JWT_SECRET = process.env.JWT_SECRET || "enterprise_wp_automation_jwt_secret_2026";
+        user = jwt.verify(token, JWT_SECRET);
+      } catch (e) {}
+    }
+
+    const isMaster = user && (user.role === "master_admin" || user.username?.toLowerCase() === "piyushassudani");
+    const isAdmin = user && (isMaster || user.role === "admin");
+
+    if (!isAdmin) {
+      return res.status(403).json({ error: "Access denied. Only Administrators can export campaign data to Excel." });
+    }
+
+    const campResult = await db.query(`SELECT * FROM campaigns WHERE id = $1`, [id]);
+    if (campResult.rows.length === 0) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+    const campaign = campResult.rows[0];
+
+    const result = await db.query(
+      `SELECT m.id, c.name, c.phone_number, m.status, m.error_message, m.timestamp
+       FROM messages m
+       JOIN contacts c ON m.contact_id = c.id
+       WHERE m.campaign_id = $1
+       ORDER BY m.timestamp DESC`,
+      [id]
+    );
+
+    const rows = result.rows.map((r, index) => {
+      let derivedStatus = r.status ? r.status.toUpperCase() : "PENDING";
+      let failureCategory = "N/A";
+      const err = (r.error_message || "").toLowerCase();
+
+      if (r.status === "failed") {
+        if (err.includes("undeliverable") || err.includes("not on whatsapp")) {
+          derivedStatus = "NOT ON WHATSAPP";
+          failureCategory = "Invalid / Non-WhatsApp Number (131026)";
+        } else if (err.includes("ecosystem") || err.includes("spam") || err.includes("re-engagement")) {
+          derivedStatus = "SPAM / BLOCKED";
+          failureCategory = "Meta Ecosystem / Spam Rate Limit (131047)";
+        } else if (err.includes("rate limit") || err.includes("throughput")) {
+          derivedStatus = "RATE LIMIT";
+          failureCategory = "Cloud API Rate Limit / Tier Threshold (130429)";
+        } else {
+          derivedStatus = "FAILED";
+          failureCategory = "Meta Dispatch Rejection";
+        }
+      }
+
+      return {
+        "S.No": index + 1,
+        "Campaign Name": campaign.name,
+        "Template Name": campaign.template_name,
+        "Recipient Name": r.name || "N/A",
+        "Phone Number": `+${r.phone_number}`,
+        "Delivery Status": derivedStatus,
+        "Error Category": failureCategory,
+        "Detailed Error Message": r.error_message || "",
+        "Last Status Timestamp": r.timestamp ? new Date(r.timestamp).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : "N/A",
+      };
+    });
+
+    const wb = xlsx.utils.book_new();
+    const ws = xlsx.utils.json_to_sheet(rows);
+
+    // Auto-fit column widths
+    const colWidths = [
+      { wch: 6 },  // S.No
+      { wch: 22 }, // Campaign Name
+      { wch: 20 }, // Template Name
+      { wch: 22 }, // Recipient Name
+      { wch: 18 }, // Phone Number
+      { wch: 18 }, // Delivery Status
+      { wch: 30 }, // Error Category
+      { wch: 45 }, // Detailed Error Message
+      { wch: 24 }, // Last Status Timestamp
+    ];
+    ws["!cols"] = colWidths;
+
+    xlsx.utils.book_append_sheet(wb, ws, "Campaign Analytics");
+
+    const buffer = xlsx.write(wb, { type: "buffer", bookType: "xlsx" });
+
+    const safeName = campaign.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const filename = `${safeName}_analytics_${Date.now()}.xlsx`;
+
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    return res.send(buffer);
+  } catch (err) {
+    console.error("❌ Export campaign error:", err);
+    res.status(500).json({ error: "Failed to export campaign report to Excel." });
   }
 });
 
