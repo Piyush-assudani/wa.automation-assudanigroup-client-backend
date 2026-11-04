@@ -154,8 +154,8 @@ const sendMediaMessage = async (to, mediaUrl, type = "image", customConfig = nul
   }
 };
 
-const sendMediaById = async (to, mediaId, type = "image") => {
-  const { apiBase, phoneId, token } = getMetaConfig();
+const sendMediaById = async (to, mediaId, type = "image", customConfig = null) => {
+  const { apiBase, phoneId, token } = getMetaConfig(customConfig);
 
   if (!token || !phoneId) {
     return {
@@ -195,8 +195,8 @@ const sendMediaById = async (to, mediaId, type = "image") => {
   }
 };
 
-const uploadMediaToMeta = async (filePath, mimeType) => {
-  const { apiBase, phoneId, token } = getMetaConfig();
+const uploadMediaToMeta = async (filePath, mimeType, customConfig = null) => {
+  const { apiBase, phoneId, token } = getMetaConfig(customConfig);
 
   if (!token || !phoneId) {
     console.warn("⚠️ Meta Cloud credentials not set; skipping uploadMediaToMeta");
@@ -262,8 +262,8 @@ const downloadMediaFromMeta = async (mediaId) => {
   }
 };
 
-const getTemplates = async () => {
-  const { apiBase, token, wabaId } = getMetaConfig();
+const getTemplates = async (customConfig = null) => {
+  const { apiBase, token, wabaId } = getMetaConfig(customConfig);
 
   if (!token || !wabaId) {
     return [];
@@ -290,16 +290,18 @@ const getTemplates = async () => {
 
 let cachedAppId = null;
 
-const getMetaAppId = async () => {
-  if (cachedAppId) return cachedAppId;
-  const { apiBase, token } = getMetaConfig();
+const getMetaAppId = async (customConfig = null) => {
+  if (cachedAppId && !customConfig) return cachedAppId;
+  const { apiBase, token } = getMetaConfig(customConfig);
   try {
     const res = await axios.get(`${apiBase}/app`, {
       headers: { Authorization: `Bearer ${token}` },
       timeout: 10000,
     });
-    cachedAppId = res.data?.id;
-    return cachedAppId;
+    if (!customConfig) {
+      cachedAppId = res.data?.id;
+    }
+    return res.data?.id;
   } catch (err) {
     console.error("❌ Failed to query Meta app ID:", err.response?.data || err.message);
     return null;
@@ -316,9 +318,9 @@ const DEFAULT_SAMPLE_PDF = Buffer.from(
   "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 3 3]>>endobj\nxref\n0 4\n0000000000 65535 f\n0000000009 00000 n\n0000000052 00000 n\n0000000101 00000 n\ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n147\n%%EOF\n"
 );
 
-const createSampleMediaHandle = async (fileBuffer, mimeType, fileName) => {
-  const { apiBase, token } = getMetaConfig();
-  const appId = await getMetaAppId();
+const createSampleMediaHandle = async (fileBuffer, mimeType, fileName, customConfig = null) => {
+  const { apiBase, token } = getMetaConfig(customConfig);
+  const appId = await getMetaAppId(customConfig);
 
   if (!appId || !token) {
     throw new Error("Unable to obtain Meta App ID or Access Token for sample media upload.");
@@ -370,9 +372,10 @@ const createTemplate = async (
   footerText = "",
   buttons = [],
   sampleFile = null,
-  sampleUrl = null
+  sampleUrl = null,
+  customConfig = null
 ) => {
-  const { apiBase, token, wabaId } = getMetaConfig();
+  const { apiBase, token, wabaId } = getMetaConfig(customConfig);
 
   if (!token || !wabaId) {
     throw new Error("Meta WABA_ID or META_ACCESS_TOKEN is missing in backend .env.");
@@ -442,7 +445,7 @@ const createTemplate = async (
           }
         }
 
-        const realHandle = await createSampleMediaHandle(sampleBuffer, sampleMime, sampleName);
+        const realHandle = await createSampleMediaHandle(sampleBuffer, sampleMime, sampleName, customConfig);
 
         components.unshift({
           type: "HEADER",

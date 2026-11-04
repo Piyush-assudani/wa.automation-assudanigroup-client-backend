@@ -7,32 +7,7 @@ const { uploadFileToCloudinary } = require("../services/cloudinaryService");
 const multer = require("multer");
 const os = require("os");
 const jwt = require("jsonwebtoken");
-
-const getUserMetaConfig = async (req) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
-    const token = authHeader.split(" ")[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || "enterprise_wp_automation_jwt_secret_2026");
-    if (!decoded || !decoded.id) return null;
-
-    const userRes = await db.query(
-      "SELECT whatsapp_mode, meta_phone_number_id, meta_access_token, meta_waba_id FROM public.users WHERE id = $1",
-      [decoded.id]
-    );
-    const user = userRes.rows[0];
-    if (user && user.whatsapp_mode === "personal" && user.meta_phone_number_id && user.meta_access_token) {
-      return {
-        phoneId: user.meta_phone_number_id,
-        token: user.meta_access_token,
-        wabaId: user.meta_waba_id,
-      };
-    }
-  } catch (err) {
-    // ignore, fall back to company default
-  }
-  return null;
-};
+const { getUserMetaConfig } = require("../middleware/authMiddleware");
 
 const isValidUuid = (val) =>
   typeof val === "string" &&
@@ -431,10 +406,12 @@ router.post("/:contactId/media", upload.single("file"), async (req, res) => {
       displayBody = "[Document]";
     }
 
+    const userMetaConfig = await getUserMetaConfig(req);
+
     // 1. Upload to Meta first directly using temp stream
     let metaMediaId = null;
     try {
-      metaMediaId = await uploadMediaToMeta(req.file.path, req.file.mimetype);
+      metaMediaId = await uploadMediaToMeta(req.file.path, req.file.mimetype, userMetaConfig);
     } catch (metaErr) {
       console.warn("⚠️ Meta pre-upload failed, will fallback to URL:", metaErr.message);
     }
@@ -448,9 +425,9 @@ router.post("/:contactId/media", upload.single("file"), async (req, res) => {
     // 4. Send via Meta API (prefer Meta Media ID for reliability, fallback to public mediaUrl)
     let result;
     if (metaMediaId) {
-      result = await sendMediaById(contact.phone_number, metaMediaId, metaType);
+      result = await sendMediaById(contact.phone_number, metaMediaId, metaType, userMetaConfig);
     } else {
-      result = await sendMediaMessage(contact.phone_number, mediaUrl, metaType);
+      result = await sendMediaMessage(contact.phone_number, mediaUrl, metaType, userMetaConfig);
     }
 
     if (!result.success) {

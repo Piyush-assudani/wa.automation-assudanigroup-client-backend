@@ -52,24 +52,40 @@ const requireAdmin = (req, res, next) => {
 const getUserMetaConfig = async (req) => {
   try {
     let effectiveUserId = req.targetUserId || req.user?.id;
-    if (!effectiveUserId && req.headers.authorization && req.headers.authorization.startsWith("Bearer ")) {
+    if (!effectiveUserId && req.headers?.authorization && req.headers.authorization.startsWith("Bearer ")) {
       const token = req.headers.authorization.split(" ")[1];
       const decoded = jwt.decode(token);
       effectiveUserId = decoded?.id;
+    }
+    // SaaS Client Switcher header for Master Admin
+    if (req.headers && req.headers["x-client-id"]) {
+      effectiveUserId = req.headers["x-client-id"];
     }
     if (!effectiveUserId) return null;
 
     const db = require("../db");
     const userRes = await db.query(
-      "SELECT whatsapp_mode, meta_phone_number_id, meta_access_token, meta_waba_id FROM public.users WHERE id = $1",
+      "SELECT whatsapp_mode, meta_phone_number_id, meta_access_token, meta_waba_id, parent_client_id FROM public.users WHERE id = $1",
       [effectiveUserId]
     );
-    const user = userRes.rows[0];
+    let user = userRes.rows[0];
+
+    // If sub-login / staff, inherit parent client organization credentials
+    if (user && user.parent_client_id) {
+      const parentRes = await db.query(
+        "SELECT whatsapp_mode, meta_phone_number_id, meta_access_token, meta_waba_id FROM public.users WHERE id = $1",
+        [user.parent_client_id]
+      );
+      if (parentRes.rows[0]) {
+        user = parentRes.rows[0];
+      }
+    }
+
     if (user && user.whatsapp_mode === "personal" && user.meta_phone_number_id && user.meta_access_token) {
       return {
-        phoneId: user.meta_phone_number_id,
-        token: user.meta_access_token,
-        wabaId: user.meta_waba_id,
+        phoneId: user.meta_phone_number_id.trim(),
+        token: user.meta_access_token.trim(),
+        wabaId: user.meta_waba_id ? user.meta_waba_id.trim() : null,
       };
     }
   } catch (err) {
