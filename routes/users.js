@@ -404,15 +404,15 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
         password = $2,
         raw_password = $3,
         role = $4,
-        parent_client_id = $5,
+        parent_client_id = $5::uuid,
         whatsapp_mode = COALESCE($6, whatsapp_mode),
         meta_phone_number_id = COALESCE($7, meta_phone_number_id),
         meta_waba_id = COALESCE($8, meta_waba_id),
-        meta_access_token = CASE WHEN $9 IS NOT NULL AND $9 <> '' THEN $9 ELSE meta_access_token END,
+        meta_access_token = COALESCE(NULLIF($9::text, ''), meta_access_token),
         meta_verified_name = COALESCE($10, meta_verified_name),
         meta_display_phone_number = COALESCE($11, meta_display_phone_number),
         status = COALESCE($12, status)
-      WHERE id = $13
+      WHERE id = $13::uuid
       RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_phone_number_id, meta_waba_id, meta_access_token, meta_display_phone_number, meta_verified_name, status, raw_password;
     `, [
       finalUsername,
