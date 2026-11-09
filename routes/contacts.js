@@ -32,8 +32,16 @@ router.get("/", authenticate, async (req, res) => {
     let params = [];
 
     if (effectiveUserId) {
-      // Client view: strictly isolated to their own contacts
-      whereClause = "WHERE c.user_id = $1";
+      // Client view: strictly isolated to their own contacts OR contacts messaged in their campaigns
+      whereClause = `WHERE (
+        c.user_id = $1 
+        OR c.id IN (
+          SELECT DISTINCT m_sub.contact_id 
+          FROM public.messages m_sub 
+          JOIN public.campaigns cmp_sub ON m_sub.campaign_id = cmp_sub.id 
+          WHERE cmp_sub.user_id = $1
+        )
+      )`;
       params.push(effectiveUserId);
     } else {
       // Master Admin global view: can view all, unassigned, or a selected client

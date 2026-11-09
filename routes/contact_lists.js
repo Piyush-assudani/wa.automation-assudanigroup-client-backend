@@ -317,15 +317,17 @@ router.post("/:id/contacts", async (req, res) => {
 
     const safeName = (typeof name === "string" ? name.trim().slice(0, 255) : "") || "Unknown";
     const safeCity = typeof city === "string" ? city.trim().slice(0, 255) : "";
+    const effectiveUserId = req.targetUserId || req.user?.id || null;
 
     const contactResult = await db.query(
-      `INSERT INTO contacts (phone_number, name, city)
-       VALUES ($1, $2, $3)
+      `INSERT INTO contacts (phone_number, name, city, user_id)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (phone_number) DO UPDATE SET 
          name = COALESCE(NULLIF(EXCLUDED.name, ''), contacts.name),
-         city = COALESCE(NULLIF(EXCLUDED.city, ''), contacts.city)
+         city = COALESCE(NULLIF(EXCLUDED.city, ''), contacts.city),
+         user_id = COALESCE(contacts.user_id, EXCLUDED.user_id)
        RETURNING id`,
-      [cleanedPhone, safeName, safeCity]
+      [cleanedPhone, safeName, safeCity, effectiveUserId]
     );
     const contactId = contactResult.rows[0].id;
 

@@ -70,9 +70,10 @@ const initBullMQ = (io) => {
 
         const result = await sendTemplateMessage(to, templateName, languageCode, components, job.data.customMetaConfig || null);
 
-        await db.query(
+        const msgRes = await db.query(
           `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp)
-           VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, NOW())`,
+           VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, NOW())
+           RETURNING *`,
           [
             campaignId,
             contactId,
@@ -83,8 +84,18 @@ const initBullMQ = (io) => {
             result.success ? null : (result.error || "Failed to send template message via Meta API"),
           ]
         );
+        const savedMsg = msgRes.rows[0];
 
-        
+        const campRes = await db.query("SELECT user_id FROM campaigns WHERE id = $1", [campaignId]);
+        const campaignOwnerId = campRes.rows[0]?.user_id || null;
+
+        if (campaignOwnerId) {
+          await db.query(
+            `UPDATE contacts SET user_id = $1 WHERE id = $2 AND (user_id IS NULL OR user_id = $1)`,
+            [campaignOwnerId, contactId]
+          );
+        }
+
         if (result.success) {
           await db.query(
             `UPDATE campaigns SET total_sent = total_sent + 1 WHERE id = $1`,
@@ -92,13 +103,26 @@ const initBullMQ = (io) => {
           );
         }
 
-        
         if (io) {
           io.emit("campaign_progress", {
             campaignId,
             phone: to,
             success: result.success,
             error: result.error || null,
+          });
+
+          io.emit("new_message", {
+            id: savedMsg?.id,
+            contact_id: contactId,
+            contact_phone: to,
+            contact_name: null,
+            contact_user_id: campaignOwnerId,
+            direction: "outbound",
+            message_body: `[Template: ${templateName}]`,
+            media_url: mediaUrl,
+            meta_message_id: result.messageId,
+            status: result.success ? "sent" : "failed",
+            timestamp: savedMsg?.timestamp || new Date().toISOString(),
           });
         }
 
@@ -219,9 +243,10 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
         }
       }
 
-      await db.query(
+      const msgRes = await db.query(
         `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp)
-         VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, NOW())`,
+         VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, NOW())
+         RETURNING *`,
         [
           campaignId,
           contactId,
@@ -232,6 +257,14 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
           result.success ? null : (result.error || "Failed to send template message via Meta API"),
         ]
       );
+      const savedMsg = msgRes.rows[0];
+
+      if (campaignOwnerId) {
+        await db.query(
+          `UPDATE contacts SET user_id = $1 WHERE id = $2 AND (user_id IS NULL OR user_id = $1)`,
+          [campaignOwnerId, contactId]
+        );
+      }
 
       if (result.success) {
         await db.query(
@@ -245,11 +278,26 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
           const { invalidateDashboardCache } = require("../routes/dashboard");
           invalidateDashboardCache();
         } catch (e) {}
+
         io.emit("campaign_progress", {
           campaignId,
           phone: to,
           success: result.success,
           error: result.error || null,
+        });
+
+        io.emit("new_message", {
+          id: savedMsg?.id,
+          contact_id: contactId,
+          contact_phone: to,
+          contact_name: null,
+          contact_user_id: campaignOwnerId,
+          direction: "outbound",
+          message_body: `[Template: ${templateName}]`,
+          media_url: mediaUrl,
+          meta_message_id: result.messageId,
+          status: result.success ? "sent" : "failed",
+          timestamp: savedMsg?.timestamp || new Date().toISOString(),
         });
       }
     } catch (error) {
