@@ -398,35 +398,42 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
       }
     }
 
+    const finalParentClientId = parent_client_id !== undefined ? (parent_client_id || null) : current.parent_client_id;
+    const finalWhatsappMode = whatsapp_mode !== undefined && whatsapp_mode !== null ? whatsapp_mode : current.whatsapp_mode;
+    const finalPhoneId = meta_phone_number_id !== undefined ? (meta_phone_number_id ? meta_phone_number_id.trim() : null) : current.meta_phone_number_id;
+    const finalWabaId = meta_waba_id !== undefined ? (meta_waba_id ? meta_waba_id.trim() : null) : current.meta_waba_id;
+    const finalAccessToken = meta_access_token && meta_access_token.trim() !== "" ? meta_access_token.trim() : current.meta_access_token;
+    const finalStatus = status !== undefined && status !== null ? status : (current.status || "active");
+
     const updateResult = await db.query(`
       UPDATE public.users SET
         username = $1,
         password = $2,
         raw_password = $3,
         role = $4,
-        parent_client_id = $5::uuid,
-        whatsapp_mode = COALESCE($6, whatsapp_mode),
-        meta_phone_number_id = COALESCE($7, meta_phone_number_id),
-        meta_waba_id = COALESCE($8, meta_waba_id),
-        meta_access_token = COALESCE(NULLIF($9::text, ''), meta_access_token),
-        meta_verified_name = COALESCE($10, meta_verified_name),
-        meta_display_phone_number = COALESCE($11, meta_display_phone_number),
-        status = COALESCE($12, status)
-      WHERE id = $13::uuid
+        parent_client_id = $5,
+        whatsapp_mode = $6,
+        meta_phone_number_id = $7,
+        meta_waba_id = $8,
+        meta_access_token = $9,
+        meta_verified_name = $10,
+        meta_display_phone_number = $11,
+        status = $12
+      WHERE id = $13
       RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_phone_number_id, meta_waba_id, meta_access_token, meta_display_phone_number, meta_verified_name, status, raw_password;
     `, [
       finalUsername,
       finalPassword,
       finalRawPassword,
       finalRole,
-      parent_client_id !== undefined ? (parent_client_id || null) : current.parent_client_id,
-      whatsapp_mode || null,
-      meta_phone_number_id !== undefined ? (meta_phone_number_id ? meta_phone_number_id.trim() : null) : current.meta_phone_number_id,
-      meta_waba_id !== undefined ? (meta_waba_id ? meta_waba_id.trim() : null) : current.meta_waba_id,
-      meta_access_token ? meta_access_token.trim() : null,
+      finalParentClientId,
+      finalWhatsappMode,
+      finalPhoneId,
+      finalWabaId,
+      finalAccessToken,
       verifiedName,
       displayPhone,
-      status,
+      finalStatus,
       id,
     ]);
 
