@@ -7,7 +7,10 @@ const { uploadFileToCloudinary } = require("../services/cloudinaryService");
 const multer = require("multer");
 const os = require("os");
 const jwt = require("jsonwebtoken");
-const { getUserMetaConfig } = require("../middleware/authMiddleware");
+const { authenticate, getUserMetaConfig } = require("../middleware/authMiddleware");
+
+// Require authentication on all message endpoints
+router.use(authenticate);
 
 const isValidUuid = (val) =>
   typeof val === "string" &&
@@ -230,6 +233,17 @@ router.post("/:contactId", async (req, res) => {
         });
       }
       fundTxId = fundCheck.txId;
+
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("wallet_updated", {
+          user_id: effectiveUserId,
+          new_balance: fundCheck.newBalance,
+          cost: fundCheck.cost,
+          category: "service",
+          type: "debit",
+        });
+      }
     }
 
     const userMetaConfig = await getUserMetaConfig(req);
@@ -243,6 +257,13 @@ router.post("/:contactId", async (req, res) => {
     if (!result.success) {
       if (effectiveUserId && fundTxId) {
         await refundMessageFund(effectiveUserId, fundTxId, result.error || "Meta Send Failed");
+        const io = req.app.get("io");
+        if (io) {
+          io.emit("wallet_updated", {
+            user_id: effectiveUserId,
+            type: "refund",
+          });
+        }
       }
       return res.status(502).json({
         error: "Failed to send message via Meta API",
@@ -309,6 +330,39 @@ router.post("/:contactId/template", async (req, res) => {
     }
     const contact = contactResult.rows[0];
 
+    const effectiveUserId = req.targetUserId || req.user?.id;
+    const { checkAndDeductMessageFund, refundMessageFund } = require("./billing");
+
+    // Check & deduct template message funds (₹0.85 Marketing)
+    let fundTxId = null;
+    if (effectiveUserId) {
+      const fundCheck = await checkAndDeductMessageFund(effectiveUserId, {
+        category: "marketing",
+        recipientPhone: contact.phone_number,
+        recipientName: contact.name,
+        customDescription: `Template "${template_name.trim()}" to ${contact.name || contact.phone_number}`,
+      });
+
+      if (!fundCheck.allowed) {
+        return res.status(402).json({
+          error: fundCheck.error || "Insufficient wallet balance. Please recharge funds to send template.",
+          balance: fundCheck.balance,
+        });
+      }
+      fundTxId = fundCheck.txId;
+
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("wallet_updated", {
+          user_id: effectiveUserId,
+          new_balance: fundCheck.newBalance,
+          cost: fundCheck.cost,
+          category: "marketing",
+          type: "debit",
+        });
+      }
+    }
+
     const userMetaConfig = await getUserMetaConfig(req);
     const result = await sendTemplateMessage(
       contact.phone_number,
@@ -319,6 +373,16 @@ router.post("/:contactId/template", async (req, res) => {
     );
 
     if (!result.success) {
+      if (effectiveUserId && fundTxId) {
+        await refundMessageFund(effectiveUserId, fundTxId, result.error || "Meta Template Dispatch Failed");
+        const io = req.app.get("io");
+        if (io) {
+          io.emit("wallet_updated", {
+            user_id: effectiveUserId,
+            type: "refund",
+          });
+        }
+      }
       return res.status(502).json({
         error: "Failed to send template via Meta API",
         details: result.error,
@@ -431,6 +495,39 @@ router.post("/:contactId/media", upload.single("file"), async (req, res) => {
       displayBody = "[Document]";
     }
 
+    // Check & deduct live chat service media message funds (₹0.30)
+    const effectiveUserId = req.targetUserId || req.user?.id;
+    const { checkAndDeductMessageFund, refundMessageFund } = require("./billing");
+
+    let fundTxId = null;
+    if (effectiveUserId) {
+      const fundCheck = await checkAndDeductMessageFund(effectiveUserId, {
+        category: "service",
+        recipientPhone: contact.phone_number,
+        recipientName: contact.name,
+        customDescription: `Media (${metaType}) to ${contact.name || contact.phone_number}`,
+      });
+
+      if (!fundCheck.allowed) {
+        return res.status(402).json({
+          error: fundCheck.error || "Insufficient wallet balance. Please recharge funds.",
+          balance: fundCheck.balance,
+        });
+      }
+      fundTxId = fundCheck.txId;
+
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("wallet_updated", {
+          user_id: effectiveUserId,
+          new_balance: fundCheck.newBalance,
+          cost: fundCheck.cost,
+          category: "service",
+          type: "debit",
+        });
+      }
+    }
+
     const userMetaConfig = await getUserMetaConfig(req);
 
     // 1. Upload to Meta first directly using temp stream
@@ -456,6 +553,16 @@ router.post("/:contactId/media", upload.single("file"), async (req, res) => {
     }
 
     if (!result.success) {
+      if (effectiveUserId && fundTxId) {
+        await refundMessageFund(effectiveUserId, fundTxId, result.error || "Meta Media Dispatch Failed");
+        const io = req.app.get("io");
+        if (io) {
+          io.emit("wallet_updated", {
+            user_id: effectiveUserId,
+            type: "refund",
+          });
+        }
+      }
       return res.status(502).json({ error: "Failed to send media via Meta API", details: result.error });
     }
 

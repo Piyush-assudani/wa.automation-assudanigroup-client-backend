@@ -195,35 +195,18 @@ async function refundMessageFund(userId, txId, reason = "Message Delivery Failed
 /**
  * GET /api/billing/summary
  * Returns wallet metrics, balance, rates, and breakdown by category
+ * Supports client filtering for Master Admin, and Global SaaS aggregated metrics
  */
 router.get("/summary", authenticate, async (req, res) => {
   try {
-    const userId = getEffectiveUserId(req);
+    const isMaster = req.user?.role === "master_admin" || (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
+    const targetClientId = req.headers["x-client-id"] || req.query.client_id;
+    const effectiveUserId = targetClientId || (!isMaster ? req.user?.id : null);
 
-    const userRes = await db.query(
-      "SELECT id, username, wallet_balance, currency, per_msg_rate FROM public.users WHERE id = $1",
-      [userId]
-    );
-
-    if (userRes.rows.length === 0) {
-      return res.status(404).json({ error: "User account not found." });
-    }
-
-    const user = userRes.rows[0];
-    const balance = parseFloat(user.wallet_balance || 0);
-
-    // Aggregate statistics
-    const statsRes = await db.query(
-      `SELECT
-        category,
-        COUNT(*) FILTER (WHERE type = 'debit' AND status = 'completed') as count,
-        COALESCE(SUM(amount) FILTER (WHERE type = 'debit' AND status = 'completed'), 0) as total_spent
-       FROM public.wallet_transactions
-       WHERE user_id = $1
-       GROUP BY category`,
-      [userId]
-    );
-
+    let balance = 0;
+    let currency = "INR";
+    let totalSpent = 0;
+    let totalMessages = 0;
     const categoryBreakdown = {
       marketing: { count: 0, spent: 0, rate: RATES.marketing },
       utility: { count: 0, spent: 0, rate: RATES.utility },
@@ -231,28 +214,81 @@ router.get("/summary", authenticate, async (req, res) => {
       service: { count: 0, spent: 0, rate: RATES.service },
     };
 
-    let totalSpent = 0;
-    let totalMessages = 0;
+    if (effectiveUserId) {
+      // Specific client view
+      const userRes = await db.query(
+        "SELECT id, username, wallet_balance, currency, per_msg_rate FROM public.users WHERE id = $1",
+        [effectiveUserId]
+      );
 
-    statsRes.rows.forEach((row) => {
-      const cat = (row.category || "marketing").toLowerCase();
-      const count = parseInt(row.count || 0);
-      const spent = parseFloat(row.total_spent || 0);
-      if (categoryBreakdown[cat]) {
-        categoryBreakdown[cat].count = count;
-        categoryBreakdown[cat].spent = spent;
+      if (userRes.rows.length === 0) {
+        return res.status(404).json({ error: "User account not found." });
       }
-      totalSpent += spent;
-      totalMessages += count;
-    });
+
+      const user = userRes.rows[0];
+      balance = parseFloat(user.wallet_balance || 0);
+      currency = user.currency || "INR";
+
+      // Aggregate statistics for this client
+      const statsRes = await db.query(
+        `SELECT
+          category,
+          COUNT(*) FILTER (WHERE type = 'debit' AND status = 'completed') as count,
+          COALESCE(SUM(amount) FILTER (WHERE type = 'debit' AND status = 'completed'), 0) as total_spent
+         FROM public.wallet_transactions
+         WHERE user_id = $1
+         GROUP BY category`,
+        [effectiveUserId]
+      );
+
+      statsRes.rows.forEach((row) => {
+        const cat = (row.category || "marketing").toLowerCase();
+        const count = parseInt(row.count || 0);
+        const spent = parseFloat(row.total_spent || 0);
+        if (categoryBreakdown[cat]) {
+          categoryBreakdown[cat].count = count;
+          categoryBreakdown[cat].spent = spent;
+        }
+        totalSpent += spent;
+        totalMessages += count;
+      });
+    } else {
+      // Master Admin Global View (Aggregated across all client workspaces)
+      const totalBalanceRes = await db.query(
+        "SELECT COALESCE(SUM(wallet_balance), 0) as total_balance FROM public.users WHERE role != 'master_admin' AND LOWER(username) != 'piyushassudani'"
+      );
+      balance = parseFloat(totalBalanceRes.rows[0]?.total_balance || 0);
+
+      const statsRes = await db.query(
+        `SELECT
+          category,
+          COUNT(*) FILTER (WHERE type = 'debit' AND status = 'completed') as count,
+          COALESCE(SUM(amount) FILTER (WHERE type = 'debit' AND status = 'completed'), 0) as total_spent
+         FROM public.wallet_transactions
+         GROUP BY category`
+      );
+
+      statsRes.rows.forEach((row) => {
+        const cat = (row.category || "marketing").toLowerCase();
+        const count = parseInt(row.count || 0);
+        const spent = parseFloat(row.total_spent || 0);
+        if (categoryBreakdown[cat]) {
+          categoryBreakdown[cat].count = count;
+          categoryBreakdown[cat].spent = spent;
+        }
+        totalSpent += spent;
+        totalMessages += count;
+      });
+    }
 
     res.json({
-      wallet_balance: balance,
-      currency: user.currency || "INR",
+      wallet_balance: Math.round(balance * 100) / 100,
+      currency,
       rates: RATES,
       total_spent: Math.round(totalSpent * 100) / 100,
       total_messages_sent: totalMessages,
       breakdown: categoryBreakdown,
+      is_global_view: !effectiveUserId && isMaster,
     });
   } catch (err) {
     console.error("Billing summary error:", err);
@@ -263,70 +299,76 @@ router.get("/summary", authenticate, async (req, res) => {
 /**
  * GET /api/billing/transactions
  * Returns list of message deductions and wallet transactions with filters
+ * Allows Master Admin to view all clients or filter by client with client_username joined
  */
 router.get("/transactions", authenticate, async (req, res) => {
   try {
-    const userId = getEffectiveUserId(req);
+    const isMaster = req.user?.role === "master_admin" || (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
+    const targetClientId = req.headers["x-client-id"] || req.query.client_id;
+    const effectiveUserId = targetClientId || (!isMaster ? req.user?.id : null);
     const { category, type, search, limit = 50, offset = 0 } = req.query;
 
-    let query = `
-      SELECT id, user_id, type, amount, balance_after, description, 
-             recipient_phone, recipient_name, category, status, created_at
-      FROM public.wallet_transactions
-      WHERE user_id = $1
-    `;
-    const params = [userId];
-    let pIdx = 2;
+    let whereClauses = [];
+    let params = [];
+    let pIdx = 1;
+
+    if (effectiveUserId) {
+      whereClauses.push(`wt.user_id = $${pIdx}`);
+      params.push(effectiveUserId);
+      pIdx++;
+    }
 
     if (category && category !== "all") {
-      query += ` AND category = $${pIdx}`;
+      whereClauses.push(`wt.category = $${pIdx}`);
       params.push(category.toLowerCase());
       pIdx++;
     }
 
     if (type && type !== "all") {
-      query += ` AND type = $${pIdx}`;
+      whereClauses.push(`wt.type = $${pIdx}`);
       params.push(type.toLowerCase());
       pIdx++;
     }
 
     if (search && search.trim()) {
-      query += ` AND (recipient_phone ILIKE $${pIdx} OR recipient_name ILIKE $${pIdx} OR description ILIKE $${pIdx})`;
+      whereClauses.push(`(wt.recipient_phone ILIKE $${pIdx} OR wt.recipient_name ILIKE $${pIdx} OR wt.description ILIKE $${pIdx} OR u.username ILIKE $${pIdx})`);
       params.push(`%${search.trim()}%`);
       pIdx++;
     }
 
-    query += ` ORDER BY created_at DESC LIMIT $${pIdx} OFFSET $${pIdx + 1}`;
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+
+    const query = `
+      SELECT 
+        wt.id, 
+        wt.user_id, 
+        u.username as client_username,
+        wt.type, 
+        wt.amount, 
+        wt.balance_after, 
+        wt.description, 
+        wt.recipient_phone, 
+        wt.recipient_name, 
+        wt.category, 
+        wt.status, 
+        wt.created_at
+      FROM public.wallet_transactions wt
+      LEFT JOIN public.users u ON wt.user_id = u.id
+      ${whereSql}
+      ORDER BY wt.created_at DESC 
+      LIMIT $${pIdx} OFFSET $${pIdx + 1}
+    `;
     params.push(parseInt(limit) || 50, parseInt(offset) || 0);
 
     const result = await db.query(query, params);
 
-    // Total count for pagination
-    let countQuery = `
+    const countQuery = `
       SELECT COUNT(*) as total
-      FROM public.wallet_transactions
-      WHERE user_id = $1
+      FROM public.wallet_transactions wt
+      LEFT JOIN public.users u ON wt.user_id = u.id
+      ${whereSql}
     `;
-    const countParams = [userId];
-    let cIdx = 2;
-
-    if (category && category !== "all") {
-      countQuery += ` AND category = $${cIdx}`;
-      countParams.push(category.toLowerCase());
-      cIdx++;
-    }
-    if (type && type !== "all") {
-      countQuery += ` AND type = $${cIdx}`;
-      countParams.push(type.toLowerCase());
-      cIdx++;
-    }
-    if (search && search.trim()) {
-      countQuery += ` AND (recipient_phone ILIKE $${cIdx} OR recipient_name ILIKE $${cIdx} OR description ILIKE $${cIdx})`;
-      countParams.push(`%${search.trim()}%`);
-      cIdx++;
-    }
-
-    const countRes = await db.query(countQuery, countParams);
+    const countRes = await db.query(countQuery, params.slice(0, pIdx - 1));
 
     res.json({
       transactions: result.rows,
@@ -335,6 +377,34 @@ router.get("/transactions", authenticate, async (req, res) => {
   } catch (err) {
     console.error("Billing transactions error:", err);
     res.status(500).json({ error: "Failed to retrieve billing transactions." });
+  }
+});
+
+/**
+ * GET /api/billing/admin/clients
+ * Master Admin only: returns all client accounts with wallet balance and spending stats
+ */
+router.get("/admin/clients", authenticate, requireMasterAdmin, async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT 
+        u.id, 
+        u.username, 
+        u.role, 
+        u.wallet_balance, 
+        u.currency,
+        COALESCE(SUM(wt.amount) FILTER (WHERE wt.type = 'debit' AND wt.status = 'completed'), 0) AS total_spent,
+        COUNT(wt.id) FILTER (WHERE wt.type = 'debit' AND wt.status = 'completed') AS total_messages
+      FROM public.users u
+      LEFT JOIN public.wallet_transactions wt ON u.id = wt.user_id
+      WHERE u.role NOT IN ('master_admin') AND LOWER(u.username) != 'piyushassudani'
+      GROUP BY u.id
+      ORDER BY u.username ASC
+    `);
+    res.json({ clients: result.rows });
+  } catch (err) {
+    console.error("Admin clients billing error:", err);
+    res.status(500).json({ error: "Failed to load clients billing status." });
   }
 });
 
@@ -370,12 +440,25 @@ router.post("/recharge", authenticate, requireMasterAdmin, async (req, res) => {
 
     await db.query("UPDATE public.users SET wallet_balance = $1 WHERE id = $2", [newBalance, user_id]);
 
-    await db.query(
+    const txRes = await db.query(
       `INSERT INTO public.wallet_transactions 
         (user_id, type, amount, balance_after, description, category, status, created_at)
-       VALUES ($1, 'credit', $2, $3, $4, 'service', 'completed', NOW())`,
+       VALUES ($1, 'credit', $2, $3, $4, 'service', 'completed', NOW())
+       RETURNING id`,
       [user_id, rechargeAmount, newBalance, description.trim() || `Recharged by Admin (+₹${rechargeAmount.toFixed(2)})`]
     );
+
+    // Emit realtime Socket.io update
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("wallet_updated", {
+        user_id,
+        new_balance: newBalance,
+        amount: rechargeAmount,
+        type: "credit",
+        tx_id: txRes.rows[0]?.id,
+      });
+    }
 
     res.json({
       message: `Successfully credited ₹${rechargeAmount.toFixed(2)} to ${client.username}! New balance is ₹${newBalance.toFixed(2)}.`,

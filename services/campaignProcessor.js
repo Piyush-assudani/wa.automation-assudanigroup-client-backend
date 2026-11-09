@@ -186,6 +186,16 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
         continue;
       }
       fundTxId = fundCheck.txId;
+
+      if (io) {
+        io.emit("wallet_updated", {
+          user_id: campaignOwnerId,
+          new_balance: fundCheck.newBalance,
+          cost: fundCheck.cost,
+          category: "marketing",
+          type: "debit",
+        });
+      }
     }
     
     let messageComponents = [...components];
@@ -201,6 +211,12 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
 
       if (!result.success && campaignOwnerId && fundTxId) {
         await refundMessageFund(campaignOwnerId, fundTxId, result.error || "Meta Dispatch Failed");
+        if (io) {
+          io.emit("wallet_updated", {
+            user_id: campaignOwnerId,
+            type: "refund",
+          });
+        }
       }
 
       await db.query(
