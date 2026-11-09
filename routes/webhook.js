@@ -234,6 +234,27 @@ router.post("/", async (req, res) => {
                 [newStatus, metaMessageId, errorMsg]
               );
 
+              // Auto-refund message fund if message delivery failed at Meta
+              if (newStatus === "failed") {
+                try {
+                  const txCheck = await db.query(
+                    `SELECT wt.id, wt.user_id 
+                     FROM public.wallet_transactions wt
+                     JOIN public.messages m ON wt.message_id = m.id
+                     WHERE m.meta_message_id = $1 AND wt.type = 'debit' AND wt.status = 'completed'
+                     LIMIT 1`,
+                    [metaMessageId]
+                  );
+                  if (txCheck.rows.length > 0) {
+                    const { refundMessageFund } = require("./billing");
+                    await refundMessageFund(txCheck.rows[0].user_id, txCheck.rows[0].id, errorMsg || "Meta delivery failed");
+                    console.log(`💰 Auto-refunded wallet transaction for failed message ${metaMessageId}`);
+                  }
+                } catch (rErr) {
+                  console.warn("Notice: refund hook skipped:", rErr.message);
+                }
+              }
+
               console.log(`📊 Status updated: ${currentStatus} → ${newStatus} for ${recipientId} (${metaMessageId})${errorMsg ? ` [${errorMsg}]` : ''}`);
 
               // Emit via Socket.IO for real-time tick updates

@@ -155,7 +155,39 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
       return res.status(400).json({ error: "Selected contact lists have no recipients or are empty." });
     }
 
+    // META POLICY & HEALTH GUARDRAILS
+    const { validateCampaignGuardrails, validateMetaContent } = require("../services/metaPolicyGuard");
+    const guardCheck = validateCampaignGuardrails(membersResult.rows.length);
+    if (!guardCheck.allowed) {
+      return res.status(400).json({ error: guardCheck.error });
+    }
+
+    const nameCheck = validateMetaContent(name.trim(), "Campaign Name");
+    if (!nameCheck.compliant) {
+      return res.status(400).json({ error: nameCheck.error });
+    }
+
     const effectiveUserId = req.targetUserId || req.user?.id || null;
+
+    // WALLET BALANCE ENFORCEMENT
+    // Ensure client cannot send even one more message than their funded balance
+    if (effectiveUserId) {
+      const userRes = await db.query(
+        "SELECT wallet_balance FROM public.users WHERE id = $1",
+        [effectiveUserId]
+      );
+      const balance = parseFloat(userRes.rows[0]?.wallet_balance || 0);
+      const requiredCost = Math.round(membersResult.rows.length * 0.85 * 100) / 100;
+
+      if (balance < requiredCost) {
+        return res.status(402).json({
+          error: `Insufficient wallet balance. This campaign has ${membersResult.rows.length} recipients requiring ₹${requiredCost.toFixed(2)} (at ₹0.85/marketing message), but your available balance is ₹${balance.toFixed(2)}. Please recharge your wallet before launching.`,
+          required: requiredCost,
+          balance,
+        });
+      }
+    }
+
     const { scheduled_at } = req.body;
     const isScheduled = scheduled_at && new Date(scheduled_at) > new Date();
     const initialStatus = isScheduled ? "scheduled" : "completed";

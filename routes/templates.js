@@ -3,8 +3,10 @@ const router = express.Router();
 const multer = require("multer");
 const os = require("os");
 const fs = require("fs");
+const db = require("../db");
 const { getTemplates, createTemplate } = require("../services/metaApi");
 const { getUserMetaConfig } = require("../middleware/authMiddleware");
+const { validateTemplatePolicy } = require("../services/metaPolicyGuard");
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -33,12 +35,30 @@ router.get("/", async (req, res) => {
     const cacheKey = customConfig?.wabaId || "company_default";
     const cached = templateCacheMap.get(cacheKey);
 
+    let templates;
     if (!forceRefresh && cached && now - cached.time < TEMPLATE_CACHE_TTL) {
-      return res.json(cached.data);
+      templates = cached.data;
+    } else {
+      templates = await getTemplates(customConfig);
+      templateCacheMap.set(cacheKey, { data: templates, time: now });
     }
 
-    const templates = await getTemplates(customConfig);
-    templateCacheMap.set(cacheKey, { data: templates, time: now });
+    // STRICT CLIENT TEMPLATE ISOLATION
+    // If client user (or Master Admin viewing a specific client), ONLY return templates owned by this client!
+    const effectiveUserId = req.targetUserId || req.user?.id;
+    const isMaster = req.user?.role === "master_admin" || (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
+    const isClientView = Boolean(req.headers["x-client-id"]) || !isMaster;
+
+    if (isClientView && effectiveUserId) {
+      const clientTemplatesRes = await db.query(
+        "SELECT template_name FROM public.client_templates WHERE user_id = $1",
+        [effectiveUserId]
+      );
+      const allowedNames = new Set(clientTemplatesRes.rows.map((r) => r.template_name.toLowerCase()));
+      const clientTemplates = templates.filter((t) => allowedNames.has(t.name.toLowerCase()));
+      return res.json(clientTemplates);
+    }
+
     res.json(templates);
   } catch (err) {
     console.error("❌ Fetch templates error:", err.message);
@@ -80,6 +100,25 @@ router.post("/", upload.single("sampleFile"), async (req, res) => {
       }
     }
 
+    // META POLICY COMPLIANCE GUARD
+    // Proactively blocks illegal betting, adult content, narcotics, and get-rich-quick scams
+    const policyCheck = validateTemplatePolicy({
+      headerText,
+      bodyText: cleanText,
+      footerText,
+      buttons: parsedButtons,
+    });
+
+    if (!policyCheck.compliant) {
+      if (req.file) {
+        fs.promises.unlink(req.file.path).catch(() => {});
+      }
+      return res.status(400).json({
+        error: policyCheck.error,
+        category: policyCheck.category,
+      });
+    }
+
     const customConfig = await getUserMetaConfig(req);
     const result = await createTemplate(
       cleanName,
@@ -94,6 +133,19 @@ router.post("/", upload.single("sampleFile"), async (req, res) => {
       sampleUrl,
       customConfig
     );
+
+    // Save client template association
+    const effectiveUserId = req.targetUserId || req.user?.id;
+    if (effectiveUserId) {
+      await db.query(
+        `INSERT INTO public.client_templates (user_id, template_name, meta_template_id, language, category)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (user_id, template_name) DO UPDATE SET
+           meta_template_id = EXCLUDED.meta_template_id,
+           category = EXCLUDED.category`,
+        [effectiveUserId, cleanName, result?.id || null, language, category]
+      ).catch((e) => console.warn("Notice: could not save client template relation:", e.message));
+    }
 
     if (req.file) {
       fs.promises.unlink(req.file.path).catch(() => {});
@@ -110,6 +162,33 @@ router.post("/", upload.single("sampleFile"), async (req, res) => {
     }
     console.error("❌ Create template error:", err.message);
     res.status(500).json({ error: err.message || "Failed to create template on Meta Cloud." });
+  }
+});
+
+/**
+ * DELETE /api/templates/:name
+ * Delete template mapping and remove from client templates
+ */
+router.delete("/:name", async (req, res) => {
+  const { name } = req.params;
+  const effectiveUserId = req.targetUserId || req.user?.id;
+
+  try {
+    if (effectiveUserId) {
+      await db.query(
+        "DELETE FROM public.client_templates WHERE user_id = $1 AND LOWER(template_name) = LOWER($2)",
+        [effectiveUserId, name]
+      );
+    }
+
+    const customConfig = await getUserMetaConfig(req).catch(() => null);
+    const cacheKey = customConfig?.wabaId || "company_default";
+    templateCacheMap.delete(cacheKey);
+
+    res.json({ success: true, message: `Template "${name}" removed.` });
+  } catch (err) {
+    console.error("Delete template error:", err);
+    res.status(500).json({ error: "Failed to delete template." });
   }
 });
 
