@@ -4,12 +4,12 @@ const db = require("../db");
 const { authenticate, requireMasterAdmin } = require("../middleware/authMiddleware");
 
 // Rates per message category (in INR)
-// Meta provides 1,000 free service / customer-initiated conversations every month per WABA.
+// Clients are billed standard per-message rates for all dispatches including 24-hr customer service replies
 const RATES = {
   marketing: 0.85,
   utility: 0.35,
   authentication: 0.30,
-  service: 0.00, // 1,000 Free Customer-Initiated Conversations / month per Meta Official Policy
+  service: 0.30, // Customer Service Reply rate charged to client
 };
 
 /**
