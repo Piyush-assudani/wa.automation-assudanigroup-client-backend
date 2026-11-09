@@ -3,13 +3,14 @@ const router = express.Router();
 const db = require("../db");
 const { authenticate, requireMasterAdmin } = require("../middleware/authMiddleware");
 
-// Rates per message category (in INR)
-// Clients are billed standard per-message rates for all dispatches including 24-hr customer service replies
+// Official Meta WhatsApp Cloud API Rates for India (+91) inclusive of 18% GST
+// Perfectly aligned with Meta Business Billing Hub deductions to prevent balance drift:
+// Base Marketing ₹0.86 + 18% GST = ₹1.0148 (~₹1.015 per message / ₹2.03 for 2 messages)
 const RATES = {
-  marketing: 0.85,
-  utility: 0.35,
-  authentication: 0.30,
-  service: 0.30, // Customer Service Reply rate charged to client
+  marketing: 1.015,
+  utility: 0.413,
+  authentication: 0.354,
+  service: 0.354,
 };
 
 /**
