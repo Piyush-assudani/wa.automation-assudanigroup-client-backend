@@ -382,12 +382,25 @@ const createTemplate = async (
   }
 
   try {
-    const components = [
-      {
-        type: "BODY",
-        text: text,
-      },
-    ];
+    const bodyComponent = {
+      type: "BODY",
+      text: text,
+    };
+
+    // Meta API requires sample body_text when variables like {{1}} are present
+    const varMatches = text.match(/\{\{\d+\}\}/g);
+    if (varMatches && varMatches.length > 0) {
+      const distinctCount = new Set(varMatches).size;
+      const sampleVals = [];
+      for (let i = 1; i <= distinctCount; i++) {
+        sampleVals.push(i === 1 ? "Customer" : `Sample ${i}`);
+      }
+      bodyComponent.example = {
+        body_text: [sampleVals],
+      };
+    }
+
+    const components = [bodyComponent];
 
     if (headerType && headerType !== "NONE") {
       if (headerType === "TEXT" && headerText) {
