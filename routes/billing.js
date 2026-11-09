@@ -176,7 +176,7 @@ async function refundMessageFund(userId, txId, reason = "Message Delivery Failed
         userId,
         refundAmount,
         newBalance,
-        `Refund: ${reason} (${tx.recipient_phone || ""})`,
+        `Auto-Refund: Delivery Failed (${tx.recipient_phone || ""})`,
         tx.message_id,
         tx.campaign_id,
         tx.recipient_phone,
