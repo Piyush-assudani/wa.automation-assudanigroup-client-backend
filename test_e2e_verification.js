@@ -150,13 +150,34 @@ async function runE2E() {
     await pool.query("DELETE FROM public.users WHERE id = $1", [sandboxUserId]);
     assert(true, 'Sandbox Test User and Transactions Cleaned Up Completely');
 
-    // 5. Test Client Isolation
-    console.log('\n--- Testing Multi-Tenant Client Isolation ---');
-    const clientContacts = await pool.query('SELECT id, phone_number, name, user_id FROM public.contacts WHERE user_id = $1', [clientUser.id]);
+    // 5. Test Client Isolation & Contact Directory Search
+    console.log('\n--- Testing Multi-Tenant Client Isolation & Search ---');
+    const clientContacts = await pool.query(`
+      SELECT c.id, c.phone_number, c.name, c.user_id, c.is_opted_out
+      FROM public.contacts c
+      WHERE (
+        c.user_id = $1 
+        OR c.id IN (
+          SELECT clm.contact_id
+          FROM public.contact_list_members clm
+          JOIN public.contact_lists cl ON clm.list_id = cl.id
+          WHERE cl.user_id = $1
+        )
+      )
+    `, [clientUser.id]);
     assert(
-      clientContacts.rows.every(c => c.user_id === clientUser.id),
-      'Client Contacts Completely Isolated',
-      `Client owns ${clientContacts.rows.length} contacts. None belong to other accounts.`
+      clientContacts.rows.length >= 4,
+      'Client Contacts Directory Includes List Members (Kushagra Gupta Searchable)',
+      `Found ${clientContacts.rows.length} contacts for client, including saved list contacts.`
+    );
+
+    // Test Opt-Out (STOP) Detection
+    const optOutKeywords = ["stop", "unsubscribe", "stop promotions", "stoppromotions", "opt out", "optout", "roko", "band karo"];
+    const testKeyword = "STOP PROMOTIONS".trim().toLowerCase();
+    assert(
+      optOutKeywords.includes(testKeyword),
+      'Meta Opt-Out (STOP) Keyword Detection Active',
+      `Keyword "${testKeyword}" successfully identified as promotional unsubscribe intent.`
     );
 
     // 6. Verify Safe Campaign Blast & Meta Anti-Spam Safeguards

@@ -32,9 +32,15 @@ router.get("/", authenticate, async (req, res) => {
     let params = [];
 
     if (effectiveUserId) {
-      // Client view: strictly isolated to their own contacts OR contacts messaged in their campaigns
+      // Client view: strictly isolated to their own contacts OR contacts in their lists OR messaged in their campaigns
       whereClause = `WHERE (
         c.user_id = $1 
+        OR c.id IN (
+          SELECT clm.contact_id
+          FROM public.contact_list_members clm
+          JOIN public.contact_lists cl ON clm.list_id = cl.id
+          WHERE cl.user_id = $1
+        )
         OR c.id IN (
           SELECT DISTINCT m_sub.contact_id 
           FROM public.messages m_sub 
@@ -53,6 +59,12 @@ router.get("/", authenticate, async (req, res) => {
       } else if (client_id && isValidUuid(client_id)) {
         whereClause = `WHERE (
           c.user_id = $1 
+          OR c.id IN (
+            SELECT clm.contact_id
+            FROM public.contact_list_members clm
+            JOIN public.contact_lists cl ON clm.list_id = cl.id
+            WHERE cl.user_id = $1
+          )
           OR c.id IN (
             SELECT DISTINCT m_sub.contact_id 
             FROM public.messages m_sub 
@@ -167,15 +179,23 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Please enter a valid 10 to 15-digit phone number." });
     }
 
-    const checkResult = await db.query("SELECT id FROM contacts WHERE phone_number = $1", [cleanedPhone]);
-    if (checkResult.rows.length > 0) {
-      return res.status(400).json({ error: "A contact with this phone number already exists." });
-    }
-
     const isMaster = req.user?.role === "master_admin" || (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
     const effectiveUserId = (isMaster && !req.headers["x-client-id"]) ? null : (req.targetUserId || req.user?.id || null);
     const safeName = (typeof name === "string" ? name.trim().slice(0, 255) : "") || "Unknown";
     const safeCity = typeof city === "string" ? city.trim().slice(0, 255) : "";
+
+    const checkResult = await db.query("SELECT * FROM contacts WHERE phone_number = $1", [cleanedPhone]);
+    if (checkResult.rows.length > 0) {
+      const existing = checkResult.rows[0];
+      if (effectiveUserId && (!existing.user_id || isMaster)) {
+        await db.query(
+          "UPDATE contacts SET user_id = COALESCE($1, user_id), name = COALESCE(NULLIF($2, 'Unknown'), name) WHERE id = $3",
+          [effectiveUserId, safeName, existing.id]
+        );
+        existing.user_id = effectiveUserId || existing.user_id;
+      }
+      return res.status(200).json({ message: "Contact ready for messaging", contact: existing });
+    }
 
     const result = await db.query(
       "INSERT INTO contacts (name, phone_number, city, user_id) VALUES ($1, $2, $3, $4) RETURNING *",

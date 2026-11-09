@@ -177,6 +177,26 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
   for (let i = 0; i < messages.length; i++) {
     const { to, contactId, bodyParams } = messages[i];
 
+    // Check if contact has opted out (STOP)
+    const optCheck = await db.query("SELECT is_opted_out FROM contacts WHERE id = $1", [contactId]);
+    if (optCheck.rows[0]?.is_opted_out) {
+      console.log(`⏩ Skipping ${to} - Contact has opted out of marketing (STOP).`);
+      await db.query(
+        `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp)
+         VALUES ($1, $2, 'outbound', $3, NULL, NULL, 'failed', 'Skipped: Recipient opted out of marketing (STOP)', NOW())`,
+        [campaignId, contactId, `[Template: ${templateName}]`]
+      );
+      if (io) {
+        io.emit("campaign_progress", {
+          campaignId,
+          phone: to,
+          success: false,
+          error: "Recipient opted out (STOP)",
+        });
+      }
+      continue;
+    }
+
     // Check & deduct per-message fund
     let fundTxId = null;
     if (campaignOwnerId) {
@@ -317,7 +337,15 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
 
     
     if (i < messages.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
+      // Periodic anti-surge cooldown every 25 messages
+      if ((i + 1) % 25 === 0) {
+        console.log(`⏸️ Campaign pacing: pausing 7s after 25 messages to maintain healthy Meta quality rating...`);
+        await new Promise((resolve) => setTimeout(resolve, 7000));
+      } else {
+        // Humanized dynamic jitter between 2500ms and 4000ms
+        const dynamicDelay = 2500 + Math.floor(Math.random() * 1500);
+        await new Promise((resolve) => setTimeout(resolve, dynamicDelay));
+      }
     }
   }
 };

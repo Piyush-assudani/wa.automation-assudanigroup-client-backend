@@ -195,6 +195,25 @@ router.post("/", async (req, res) => {
               );
               const contact = contactResult.rows[0];
 
+              // Meta Marketing Opt-Out (STOP) & Opt-In (START) Detection
+              const cleanText = (messageBody || "").trim().toLowerCase();
+              const OPT_OUT_KEYWORDS = ["stop", "unsubscribe", "stop promotions", "stoppromotions", "opt out", "optout", "roko", "band karo"];
+              const OPT_IN_KEYWORDS = ["start", "unstop", "subscribe", "opt in", "optin", "chalu karo"];
+
+              if (OPT_OUT_KEYWORDS.includes(cleanText)) {
+                await db.query(
+                  "UPDATE contacts SET is_opted_out = TRUE, opted_out_at = NOW() WHERE id = $1",
+                  [contact.id]
+                );
+                console.log(`🛑 Contact ${from} requested Opt-Out (STOP). Marked as opted-out.`);
+              } else if (OPT_IN_KEYWORDS.includes(cleanText)) {
+                await db.query(
+                  "UPDATE contacts SET is_opted_out = FALSE, opted_out_at = NULL WHERE id = $1",
+                  [contact.id]
+                );
+                console.log(`✅ Contact ${from} requested Opt-In (START). Resumed.`);
+              }
+
               // Save the message
               const msgResult = await db.query(
                 `INSERT INTO messages (contact_id, direction, message_body, media_url, meta_message_id, status, timestamp)
