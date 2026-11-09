@@ -3,14 +3,13 @@ const router = express.Router();
 const db = require("../db");
 const { authenticate, requireMasterAdmin } = require("../middleware/authMiddleware");
 
-// Official Meta WhatsApp Cloud API Rates for India (+91) inclusive of 18% GST
-// Perfectly aligned with Meta Business Billing Hub deductions to prevent balance drift:
-// Base Marketing ₹0.86 + 18% GST = ₹1.0148 (~₹1.015 per message / ₹2.03 for 2 messages)
+// Safe Category Rates (INR / Message) with Platform Margin Buffer
+// Ensures client balance in system is conservative so Meta account always has surplus buffer
 const RATES = {
-  marketing: 1.015,
-  utility: 0.413,
-  authentication: 0.354,
-  service: 0.354,
+  marketing: 1.08, // Meta charges ~₹1.02; ₹1.08 provides safe margin buffer
+  utility: 0.45,
+  authentication: 0.40,
+  service: 0.40,
 };
 
 /**

@@ -69,7 +69,7 @@ async function runE2E() {
     const sandboxUserId = testUserRes.rows[0].id;
     const initialBalance = 100.00;
 
-    // 4a. Deduct Service Message (₹0.354)
+    // 4a. Deduct Service Message (₹0.40)
     const deductService = await checkAndDeductMessageFund(sandboxUserId, {
       category: 'service',
       recipientPhone: '919413879444',
@@ -77,20 +77,20 @@ async function runE2E() {
       customDescription: 'Sandbox Test Chat Message'
     });
     assert(
-      deductService.allowed && Math.abs(deductService.cost - 0.354) < 0.001,
-      'Chat Message Fund Deduction (₹0.354 Service Rate incl. GST)',
+      deductService.allowed && Math.abs(deductService.cost - 0.40) < 0.001,
+      'Chat Message Fund Deduction (₹0.40 Service Rate with Safety Buffer)',
       `Deducted: ₹${deductService.cost}, New Balance: ₹${deductService.newBalance}`
     );
 
     // Verify DB reflection
     const postServiceUser = await pool.query('SELECT wallet_balance FROM public.users WHERE id = $1', [sandboxUserId]);
     assert(
-      Math.abs(parseFloat(postServiceUser.rows[0].wallet_balance) - (initialBalance - 0.354)) < 0.01,
+      Math.abs(parseFloat(postServiceUser.rows[0].wallet_balance) - (initialBalance - 0.40)) < 0.01,
       'Database Wallet Balance Synchronized After Chat Message Debit',
-      `Expected: ₹${(initialBalance - 0.354).toFixed(3)}, Actual: ₹${postServiceUser.rows[0].wallet_balance}`
+      `Expected: ₹${(initialBalance - 0.40).toFixed(2)}, Actual: ₹${postServiceUser.rows[0].wallet_balance}`
     );
 
-    // 4b. Deduct Marketing Template Message (₹1.015 Meta Rate incl. GST)
+    // 4b. Deduct Marketing Template Message (₹1.08 Marketing Rate with Safety Margin)
     const deductTemplate = await checkAndDeductMessageFund(sandboxUserId, {
       category: 'marketing',
       recipientPhone: '919413879444',
@@ -98,8 +98,8 @@ async function runE2E() {
       customDescription: 'Sandbox Test Template Message'
     });
     assert(
-      deductTemplate.allowed && Math.abs(deductTemplate.cost - 1.015) < 0.001,
-      'Template Message Fund Deduction (₹1.015 Marketing Rate incl. GST)',
+      deductTemplate.allowed && Math.abs(deductTemplate.cost - 1.08) < 0.001,
+      'Template Message Fund Deduction (₹1.08 Marketing Rate with Buffer)',
       `Deducted: ₹${deductTemplate.cost}, New Balance: ₹${deductTemplate.newBalance}`
     );
 
