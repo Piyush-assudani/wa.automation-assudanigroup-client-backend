@@ -210,6 +210,28 @@ router.post("/:contactId", async (req, res) => {
     const trimmedMessage = typeof message === "string" ? message.trim() : "";
     const isImage = isImageUrl(trimmedMessage);
 
+    const effectiveUserId = req.targetUserId || req.user?.id;
+    const { checkAndDeductMessageFund, refundMessageFund } = require("./billing");
+
+    // Check & deduct live chat service message funds (₹0.30)
+    let fundTxId = null;
+    if (effectiveUserId) {
+      const fundCheck = await checkAndDeductMessageFund(effectiveUserId, {
+        category: "service",
+        recipientPhone: contact.phone_number,
+        recipientName: contact.name,
+        customDescription: `Chat Message to ${contact.name || contact.phone_number}`,
+      });
+
+      if (!fundCheck.allowed) {
+        return res.status(402).json({
+          error: fundCheck.error || "Insufficient wallet balance. Please contact admin to recharge funds.",
+          balance: fundCheck.balance,
+        });
+      }
+      fundTxId = fundCheck.txId;
+    }
+
     const userMetaConfig = await getUserMetaConfig(req);
     let result;
     if (isImage) {
@@ -219,6 +241,9 @@ router.post("/:contactId", async (req, res) => {
     }
 
     if (!result.success) {
+      if (effectiveUserId && fundTxId) {
+        await refundMessageFund(effectiveUserId, fundTxId, result.error || "Meta Send Failed");
+      }
       return res.status(502).json({
         error: "Failed to send message via Meta API",
         details: result.error,

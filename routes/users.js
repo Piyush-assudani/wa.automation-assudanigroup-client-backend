@@ -217,6 +217,8 @@ router.get("/", requireMasterAdmin, async (req, res) => {
         meta_verified_name,
         status, 
         raw_password,
+        wallet_balance,
+        currency,
         created_at 
       FROM public.users 
       ORDER BY 
@@ -346,6 +348,7 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
     meta_phone_number_id,
     meta_waba_id,
     meta_access_token,
+    wallet_balance,
     status = "active",
   } = req.body || {};
 
@@ -404,6 +407,7 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
     const finalWabaId = meta_waba_id !== undefined ? (meta_waba_id ? meta_waba_id.trim() : null) : current.meta_waba_id;
     const finalAccessToken = meta_access_token && meta_access_token.trim() !== "" ? meta_access_token.trim() : current.meta_access_token;
     const finalStatus = status !== undefined && status !== null ? status : (current.status || "active");
+    const finalBalance = wallet_balance !== undefined && !isNaN(parseFloat(wallet_balance)) ? parseFloat(wallet_balance) : (parseFloat(current.wallet_balance) || 0);
 
     const updateResult = await db.query(`
       UPDATE public.users SET
@@ -418,9 +422,10 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
         meta_access_token = $9,
         meta_verified_name = $10,
         meta_display_phone_number = $11,
-        status = $12
-      WHERE id = $13
-      RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_phone_number_id, meta_waba_id, meta_access_token, meta_display_phone_number, meta_verified_name, status, raw_password;
+        status = $12,
+        wallet_balance = $13
+      WHERE id = $14
+      RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_phone_number_id, meta_waba_id, meta_access_token, meta_display_phone_number, meta_verified_name, status, raw_password, wallet_balance, currency;
     `, [
       finalUsername,
       finalPassword,
@@ -434,8 +439,26 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
       verifiedName,
       displayPhone,
       finalStatus,
+      finalBalance,
       id,
     ]);
+
+    // If balance was modified directly, log an admin adjustment transaction
+    if (wallet_balance !== undefined && !isNaN(parseFloat(wallet_balance)) && parseFloat(wallet_balance) !== parseFloat(current.wallet_balance || 0)) {
+      const diff = finalBalance - parseFloat(current.wallet_balance || 0);
+      await db.query(
+        `INSERT INTO public.wallet_transactions 
+          (user_id, type, amount, balance_after, description, category, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, 'service', 'completed', NOW())`,
+        [
+          id,
+          diff >= 0 ? "credit" : "debit",
+          Math.abs(diff),
+          finalBalance,
+          diff >= 0 ? `Admin balance recharge (+₹${diff.toFixed(2)})` : `Admin balance adjustment (-₹${Math.abs(diff).toFixed(2)})`
+        ]
+      ).catch(() => {});
+    }
 
     return res.json({
       message: "User successfully updated!",

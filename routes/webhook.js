@@ -105,12 +105,14 @@ router.post("/", async (req, res) => {
                 resourceType = "image";
               } else if (message.type === "interactive") {
                 if (message.interactive.type === "button_reply") {
-                  messageBody = message.interactive.button_reply.title;
+                  messageBody = message.interactive.button_reply.title || message.interactive.button_reply.id;
                 } else if (message.interactive.type === "list_reply") {
-                  messageBody = message.interactive.list_reply.title;
+                  messageBody = message.interactive.list_reply.title || message.interactive.list_reply.id;
                 } else {
                   messageBody = "[Interactive Response]";
                 }
+              } else if (message.type === "button") {
+                messageBody = message.button?.text || message.button?.payload || "Thank You";
               } else if (message.type === "reaction") {
                 messageBody = message.reaction?.emoji || "👍";
               } else {

@@ -1,5 +1,6 @@
 const db = require("../db");
 const { sendTemplateMessage } = require("./metaApi");
+const { checkAndDeductMessageFund, refundMessageFund } = require("../routes/billing");
 
 let bullmqAvailable = false;
 let Queue, Worker;
@@ -132,6 +133,10 @@ const initBullMQ = (io) => {
 const processInMemory = async (messages, campaignId, templateName, languageCode, io, mediaId = null, mediaType = null, mediaUrl = null, customMetaConfig = null) => {
   const DELAY_MS = 2000; 
 
+  const campRes = await db.query("SELECT user_id, name FROM campaigns WHERE id = $1", [campaignId]);
+  const campaignOwnerId = campRes.rows[0]?.user_id || null;
+  const campaignName = campRes.rows[0]?.name || "Campaign";
+
   let components = [];
   if (mediaType && (mediaId || mediaUrl)) {
     components.push({
@@ -147,6 +152,41 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
 
   for (let i = 0; i < messages.length; i++) {
     const { to, contactId, bodyParams } = messages[i];
+
+    // Check & deduct per-message fund
+    let fundTxId = null;
+    if (campaignOwnerId) {
+      const fundCheck = await checkAndDeductMessageFund(campaignOwnerId, {
+        category: "marketing",
+        recipientPhone: to,
+        campaignId,
+        customDescription: `Campaign "${campaignName}" to ${to}`,
+      });
+
+      if (!fundCheck.allowed) {
+        await db.query(
+          `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp)
+           VALUES ($1, $2, 'outbound', $3, $4, NULL, 'failed', $5, NOW())`,
+          [
+            campaignId,
+            contactId,
+            `[Template: ${templateName}]`,
+            mediaUrl || null,
+            "Insufficient wallet funds. Message canceled.",
+          ]
+        );
+        if (io) {
+          io.emit("campaign_progress", {
+            campaignId,
+            phone: to,
+            success: false,
+            error: "Insufficient wallet funds",
+          });
+        }
+        continue;
+      }
+      fundTxId = fundCheck.txId;
+    }
     
     let messageComponents = [...components];
     if (bodyParams && bodyParams.length > 0) {
@@ -158,6 +198,10 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
 
     try {
       const result = await sendTemplateMessage(to, templateName, languageCode, messageComponents, customMetaConfig);
+
+      if (!result.success && campaignOwnerId && fundTxId) {
+        await refundMessageFund(campaignOwnerId, fundTxId, result.error || "Meta Dispatch Failed");
+      }
 
       await db.query(
         `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp)

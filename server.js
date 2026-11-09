@@ -139,10 +139,12 @@ const mediaRoutes = require("./routes/media");
 const dashboardRoutes = require("./routes/dashboard");
 const privacyRoutes = require("./routes/privacy");
 const usersRoutes = require("./routes/users");
+const billingRoutes = require("./routes/billing");
 
 app.use("/api", apiLimiter, apiRoutes);
 app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/users", usersRoutes);
+app.use("/api/billing", billingRoutes);
 app.use("/api/contact_lists", contactListsRoutes);
 app.use("/api/contacts", contactRoutes);
 app.use("/api/messages", messageRoutes);
