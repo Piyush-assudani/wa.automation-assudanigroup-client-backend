@@ -62,9 +62,14 @@ const sendTemplateMessage = async (to, templateName, languageCode = "en_US", com
   } catch (err) {
     console.error(`❌ Meta API sendTemplate error for ${to}:`, err.response?.data || err.message);
     const metaErr = err.response?.data?.error;
-    const detailedError = metaErr?.error_data?.details
+    let detailedError = metaErr?.error_data?.details
       ? `${metaErr.message} (${metaErr.error_data.details})`
       : metaErr?.user_msg || metaErr?.message || err.message;
+
+    if (metaErr?.code === 10 && metaErr?.message?.includes("Paid Message Account")) {
+      detailedError = `Meta Account Error: Your custom Meta credentials (test number / token) cannot access Paid Message Account. Please switch to Company Channel in Settings or add a payment method in Meta Business Suite.`;
+    }
+
     return {
       success: false,
       error: detailedError,
