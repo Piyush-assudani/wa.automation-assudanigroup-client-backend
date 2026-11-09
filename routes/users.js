@@ -305,8 +305,9 @@ router.post("/", requireMasterAdmin, async (req, res) => {
         meta_verified_name,
         meta_display_phone_number,
         status,
-        created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active', $12)
+        created_by,
+        wallet_balance
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active', $12, 0.00)
       RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_display_phone_number, raw_password, created_at;
     `, [
       cleanUser,
@@ -563,8 +564,8 @@ router.post("/team", async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(cleanPass, 10);
     const result = await db.query(
-      `INSERT INTO public.users (username, password, raw_password, role, parent_client_id, status, created_by)
-       VALUES ($1, $2, $3, 'user', $4, 'active', $5)
+      `INSERT INTO public.users (username, password, raw_password, role, parent_client_id, status, created_by, wallet_balance)
+       VALUES ($1, $2, $3, 'user', $4, 'active', $5, 0.00)
        RETURNING id, username, role, parent_client_id, raw_password, created_at`,
       [cleanUser, hashedPassword, cleanPass, parentId, req.user.username]
     );
