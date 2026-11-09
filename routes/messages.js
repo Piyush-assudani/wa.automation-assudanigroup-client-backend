@@ -8,6 +8,7 @@ const multer = require("multer");
 const os = require("os");
 const jwt = require("jsonwebtoken");
 const { authenticate, getUserMetaConfig } = require("../middleware/authMiddleware");
+const { invalidateDashboardCache } = require("./dashboard");
 
 // Require authentication on all message endpoints
 router.use(authenticate);
@@ -285,6 +286,7 @@ router.post("/:contactId", async (req, res) => {
 
     const io = req.app.get("io");
     if (io) {
+      invalidateDashboardCache();
       io.emit("new_message", {
         id: savedMessage.id,
         contact_id: contactId,
@@ -412,6 +414,7 @@ router.post("/:contactId/template", async (req, res) => {
 
     const io = req.app.get("io");
     if (io) {
+      invalidateDashboardCache();
       io.emit("new_message", {
         id: savedMessage.id,
         contact_id: contactId,
@@ -578,6 +581,7 @@ router.post("/:contactId/media", upload.single("file"), async (req, res) => {
     // Emit via Socket with correct UUID string contactId
     const io = req.app.get("io");
     if (io) {
+      invalidateDashboardCache();
       io.emit("new_message", {
         id: savedMessage.id,
         contact_id: contactId,

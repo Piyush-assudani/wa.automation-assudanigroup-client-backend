@@ -9,7 +9,9 @@ const path = require("path");
 const xlsx = require("xlsx");
 const jwt = require("jsonwebtoken");
 const { uploadMediaToMeta, getTemplates, sendTemplateMessage } = require("../services/metaApi");
-const { getUserMetaConfig } = require("../middleware/authMiddleware");
+const { getUserMetaConfig, authenticate } = require("../middleware/authMiddleware");
+
+router.use(authenticate);
 
 const isValidUuid = (val) =>
   typeof val === "string" &&

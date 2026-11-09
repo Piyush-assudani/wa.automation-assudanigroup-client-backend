@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require("../db");
 const { downloadMediaFromMeta } = require("../services/metaApi");
 const { uploadBufferToCloudinary } = require("../services/cloudinaryService");
+const { invalidateDashboardCache } = require("./dashboard");
 
 // Status hierarchy — higher number = more progressed
 const STATUS_PRIORITY = {
@@ -207,6 +208,7 @@ router.post("/", async (req, res) => {
               // Emit via Socket.IO with multi-tenant contact_user_id
               const io = req.app.get("io");
               if (io) {
+                invalidateDashboardCache();
                 io.emit("new_message", {
                   id: savedMessage.id,
                   contact_id: contact.id,
@@ -304,6 +306,7 @@ router.post("/", async (req, res) => {
               // Emit via Socket.IO for real-time tick updates
               const io = req.app.get("io");
               if (io) {
+                invalidateDashboardCache();
                 io.emit("message_status", {
                   meta_message_id: metaMessageId,
                   status: newStatus,

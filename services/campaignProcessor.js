@@ -241,6 +241,10 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
       }
 
       if (io) {
+        try {
+          const { invalidateDashboardCache } = require("../routes/dashboard");
+          invalidateDashboardCache();
+        } catch (e) {}
         io.emit("campaign_progress", {
           campaignId,
           phone: to,

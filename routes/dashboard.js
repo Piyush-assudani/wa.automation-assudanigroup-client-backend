@@ -1,62 +1,125 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../db");
+const { authenticate } = require("../middleware/authMiddleware");
 
-// In-memory cache for dashboard stats (10-second TTL to handle traffic spikes)
+// In-memory cache for dashboard stats (5-second TTL, can be bypassed with ?nocache=1 or cleared)
 const dashboardCache = new Map();
-const DASHBOARD_CACHE_TTL = 10 * 1000;
+const DASHBOARD_CACHE_TTL = 5 * 1000;
+
+function invalidateDashboardCache() {
+  dashboardCache.clear();
+}
+
+router.use(authenticate);
 
 router.get("/", async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, nocache } = req.query;
 
-    const cacheKey = `${startDate || "all"}_${endDate || "all"}`;
-    const cached = dashboardCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < DASHBOARD_CACHE_TTL) {
-      return res.json(cached.data);
+    const isMasterAdmin =
+      req.user?.role === "master_admin" ||
+      (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
+    const targetClientId = req.headers["x-client-id"];
+
+    // Multi-tenant Scoping:
+    // If master admin without targetClientId, effectiveUserId is null (Global Mode across all clients)
+    // If client, effectiveUserId is req.targetUserId || req.user.id
+    let effectiveUserId = null;
+    if (isMasterAdmin && targetClientId) {
+      effectiveUserId = targetClientId;
+    } else if (!isMasterAdmin) {
+      effectiveUserId = req.targetUserId || req.user?.id;
     }
 
-    let campaignWhere = "";
-    let messageWhere = "";
-    const params = [];
-
-    if (startDate && endDate) {
-      campaignWhere = "WHERE DATE(created_at) >= $1 AND DATE(created_at) <= $2";
-      messageWhere = "WHERE DATE(timestamp) >= $1 AND DATE(timestamp) <= $2";
-      params.push(startDate, endDate);
+    const cacheKey = `${effectiveUserId || "global"}_${startDate || "all"}_${endDate || "all"}`;
+    if (!nocache && nocache !== "1" && nocache !== "true") {
+      const cached = dashboardCache.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < DASHBOARD_CACHE_TTL) {
+        return res.json(cached.data);
+      }
     }
 
     // 1. Total Contacts
-    const contactsRes = await db.query("SELECT COUNT(*) FROM contacts");
-    const totalLeads = parseInt(contactsRes.rows[0]?.count || 0, 10);
+    let contactsCount = 0;
+    if (effectiveUserId) {
+      const resC = await db.query(
+        "SELECT COUNT(*) FROM public.contacts WHERE user_id = $1",
+        [effectiveUserId]
+      );
+      contactsCount = parseInt(resC.rows[0]?.count || 0, 10);
+    } else {
+      const resC = await db.query("SELECT COUNT(*) FROM public.contacts");
+      contactsCount = parseInt(resC.rows[0]?.count || 0, 10);
+    }
 
     // 2. Total Contact Lists
-    const listsRes = await db.query("SELECT COUNT(*) FROM contact_lists");
-    const totalLists = parseInt(listsRes.rows[0]?.count || 0, 10);
+    let listsCount = 0;
+    if (effectiveUserId) {
+      const resL = await db.query(
+        "SELECT COUNT(*) FROM public.contact_lists WHERE user_id = $1",
+        [effectiveUserId]
+      );
+      listsCount = parseInt(resL.rows[0]?.count || 0, 10);
+    } else {
+      const resL = await db.query("SELECT COUNT(*) FROM public.contact_lists");
+      listsCount = parseInt(resL.rows[0]?.count || 0, 10);
+    }
 
     // 3. Campaigns count and totals
+    let campaignWhere = [];
+    let campaignParams = [];
+    if (effectiveUserId) {
+      campaignParams.push(effectiveUserId);
+      campaignWhere.push(`user_id = $${campaignParams.length}`);
+    }
+    if (startDate && endDate) {
+      campaignParams.push(startDate, endDate);
+      campaignWhere.push(
+        `DATE(created_at) >= $${campaignParams.length - 1} AND DATE(created_at) <= $${campaignParams.length}`
+      );
+    }
+    const campWhereStr = campaignWhere.length > 0 ? `WHERE ${campaignWhere.join(" AND ")}` : "";
+
     const campaignsRes = await db.query(
       `SELECT 
         COUNT(*) as total_campaigns,
         COALESCE(SUM(total_sent), 0) as total_sent
-      FROM campaigns
-      ${campaignWhere}`,
-      params
+      FROM public.campaigns
+      ${campWhereStr}`,
+      campaignParams
     );
     const c = campaignsRes.rows[0] || {};
     const totalCampaigns = parseInt(c.total_campaigns || 0, 10);
     const campaignsSent = parseInt(c.total_sent || 0, 10);
 
-    // 4. Message counts from messages table for live accuracy
+    // 4. Message counts from messages table
+    let msgWhere = [];
+    let msgParams = [];
+    let msgFrom = "public.messages m";
+
+    if (effectiveUserId) {
+      msgFrom += " JOIN public.contacts c ON m.contact_id = c.id";
+      msgParams.push(effectiveUserId);
+      msgWhere.push(`c.user_id = $${msgParams.length}`);
+    }
+    if (startDate && endDate) {
+      msgParams.push(startDate, endDate);
+      msgWhere.push(
+        `DATE(m.timestamp) >= $${msgParams.length - 1} AND DATE(m.timestamp) <= $${msgParams.length}`
+      );
+    }
+    const msgWhereStr = msgWhere.length > 0 ? `WHERE ${msgWhere.join(" AND ")}` : "";
+
     const msgsRes = await db.query(
       `SELECT 
-        direction,
-        status,
+        m.direction,
+        m.status,
         COUNT(*) as count
-      FROM messages
-      ${messageWhere}
-      GROUP BY direction, status`,
-      params
+      FROM ${msgFrom}
+      ${msgWhereStr}
+      GROUP BY m.direction, m.status`,
+      msgParams
     );
 
     let totalMessagesSent = 0;
@@ -90,8 +153,8 @@ router.get("/", async (req, res) => {
     }
 
     const payload = {
-      totalLeads,
-      totalLists,
+      totalLeads: contactsCount,
+      totalLists: listsCount,
       totalCampaigns,
       totalMessagesSent: finalSent,
       totalMessagesReceived,
@@ -115,3 +178,4 @@ router.get("/", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.invalidateDashboardCache = invalidateDashboardCache;
