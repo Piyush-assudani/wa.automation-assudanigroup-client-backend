@@ -12,9 +12,23 @@ const isValidUuid = (val) =>
   typeof val === "string" &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(val);
 
-const cleanPhoneNumber = (raw) => {
-  if (!raw) return "";
-  let digits = String(raw).replace(/\D/g, "");
+const parseCellPhone = (cell) => {
+  if (cell === null || cell === undefined) return "";
+  let str = "";
+  if (typeof cell === "number") {
+    // Avoid scientific notation formatting issues
+    str = cell.toLocaleString("fullwide", { useGrouping: false });
+    str = str.split(".")[0];
+  } else {
+    str = String(cell).trim();
+    if (/e\+/i.test(str)) {
+      const num = Number(str);
+      if (!isNaN(num)) {
+        str = num.toLocaleString("fullwide", { useGrouping: false }).split(".")[0];
+      }
+    }
+  }
+  let digits = str.replace(/\D/g, "");
   if (digits.startsWith("0") && digits.length === 11) {
     digits = "91" + digits.slice(1);
   } else if (digits.length === 10) {
@@ -23,9 +37,11 @@ const cleanPhoneNumber = (raw) => {
   return digits;
 };
 
+const cleanPhoneNumber = (raw) => parseCellPhone(raw);
+
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024 }, // 15MB limit
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB limit
 });
 
 /**
@@ -72,7 +88,7 @@ router.get("/", async (req, res) => {
 
 /**
  * POST /api/contact_lists
- * Upload and parse Excel / CSV contact sheet
+ * Upload and parse Excel / CSV contact sheet with intelligent auto-detection and high-speed batching
  */
 router.post("/", upload.single("file"), async (req, res) => {
   try {
@@ -106,7 +122,11 @@ router.post("/", upload.single("file"), async (req, res) => {
     let fileUrl = null;
     try {
       const safeFilename = `${Date.now()}-${(req.file.originalname || "contacts.xlsx").replace(/[^a-zA-Z0-9.-]/g, "_")}`;
-      fileUrl = await uploadExcelToSupabase(req.file.buffer, safeFilename);
+      // Max 3.5s timeout for storage upload so it never blocks or hangs
+      fileUrl = await Promise.race([
+        uploadExcelToSupabase(req.file.buffer, safeFilename),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Storage timeout")), 3500)),
+      ]).catch(() => null);
     } catch (uploadErr) {
       console.warn("Supabase storage upload skipped/failed:", uploadErr.message);
     }
@@ -116,66 +136,105 @@ router.post("/", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "The uploaded file contains no data rows." });
     }
 
-    // Auto-detect header column indices
-    let nameIdx = -1;
+    // Step 1: Intelligent Auto-detection of Header Row and Column Indices
+    const PHONE_HEADER_REGEX = /(phone|mobile|whatsapp|wa|contact|number|num|cell|mob|tel|ph|calling|caller|kramank|durdwani)/i;
+    const NAME_HEADER_REGEX = /(name|customer|client|contact_name|person|full_name|fullname|first_name|naam|user|lead|party)/i;
+    const CITY_HEADER_REGEX = /(city|location|state|district|address|town|region|shahar|place|pincode|zip)/i;
+
+    let headerRowIdx = -1;
     let phoneIdx = -1;
+    let nameIdx = -1;
     let cityIdx = -1;
 
-    const firstRow = rows[0] || [];
-    firstRow.forEach((cell, idx) => {
-      const val = String(cell || "").toLowerCase().trim();
-      if (/phone|mobile|whatsapp|contact_no|cell|mob|tel/i.test(val) && phoneIdx === -1) {
-        phoneIdx = idx;
-      } else if (/name|customer|client|contact_name|person/i.test(val) && nameIdx === -1) {
-        nameIdx = idx;
-      } else if (/city|location|state|district|address/i.test(val) && cityIdx === -1) {
-        cityIdx = idx;
+    for (let r = 0; r < Math.min(rows.length, 5); r++) {
+      const row = rows[r];
+      if (!Array.isArray(row)) continue;
+      let pIdx = -1, nIdx = -1, cIdx = -1;
+      row.forEach((cell, idx) => {
+        const val = String(cell || "").toLowerCase().trim();
+        if (pIdx === -1 && PHONE_HEADER_REGEX.test(val)) pIdx = idx;
+        else if (nIdx === -1 && NAME_HEADER_REGEX.test(val)) nIdx = idx;
+        else if (cIdx === -1 && CITY_HEADER_REGEX.test(val)) cIdx = idx;
+      });
+      if (pIdx !== -1 || nIdx !== -1) {
+        headerRowIdx = r;
+        phoneIdx = pIdx;
+        nameIdx = nIdx;
+        cityIdx = cIdx;
+        break;
       }
-    });
+    }
 
-    const startRow = phoneIdx !== -1 || nameIdx !== -1 ? 1 : 0;
+    // Step 2: Content-based Auto-detection if headers were missing or ambiguous
+    const sampleRows = rows.slice(headerRowIdx !== -1 ? headerRowIdx + 1 : 0, 35);
+    if (phoneIdx === -1) {
+      const colPhoneCounts = [];
+      sampleRows.forEach((row) => {
+        if (!Array.isArray(row)) return;
+        row.forEach((cell, idx) => {
+          const digits = parseCellPhone(cell);
+          if (digits.length >= 10 && digits.length <= 15) {
+            colPhoneCounts[idx] = (colPhoneCounts[idx] || 0) + 1;
+          }
+        });
+      });
+      let maxP = 0;
+      colPhoneCounts.forEach((count, idx) => {
+        if (count > maxP) {
+          maxP = count;
+          phoneIdx = idx;
+        }
+      });
+    }
+
+    if (nameIdx === -1) {
+      const colTextCounts = [];
+      sampleRows.forEach((row) => {
+        if (!Array.isArray(row)) return;
+        row.forEach((cell, idx) => {
+          if (idx === phoneIdx) return;
+          const str = String(cell || "").trim();
+          if (str.length >= 2 && str.length <= 50 && /[a-zA-Z\u0900-\u097F]/.test(str) && !/^\d+$/.test(str)) {
+            colTextCounts[idx] = (colTextCounts[idx] || 0) + 1;
+          }
+        });
+      });
+      let maxN = 0;
+      colTextCounts.forEach((count, idx) => {
+        if (count > maxN) {
+          maxN = count;
+          nameIdx = idx;
+        }
+      });
+    }
+
+    const dataStartRow = headerRowIdx !== -1 ? headerRowIdx + 1 : 0;
     const contactsToSave = [];
 
-    for (let i = startRow; i < rows.length; i++) {
+    for (let i = dataStartRow; i < rows.length; i++) {
       const row = rows[i];
       if (!row || !Array.isArray(row) || row.length === 0) continue;
 
-      let extractedPhone = "";
-      let extractedName = "";
-      let extractedCity = "";
+      let extractedPhone = phoneIdx !== -1 ? parseCellPhone(row[phoneIdx]) : "";
+      let extractedName = nameIdx !== -1 ? String(row[nameIdx] || "").trim() : "";
+      let extractedCity = cityIdx !== -1 ? String(row[cityIdx] || "").trim() : "";
 
-      if (phoneIdx !== -1 && row[phoneIdx] !== undefined) {
-        extractedPhone = String(row[phoneIdx] || "").trim();
-      }
-      if (nameIdx !== -1 && row[nameIdx] !== undefined) {
-        extractedName = String(row[nameIdx] || "").trim();
-      }
-      if (cityIdx !== -1 && row[cityIdx] !== undefined) {
-        extractedCity = String(row[cityIdx] || "").trim();
-      }
-
-      // If phone wasn't detected by header, scan cells for a 10-15 digit string
-      if (!extractedPhone) {
+      // Fallback: if designated phone cell is empty/invalid, scan all cells in the row
+      if (!extractedPhone || extractedPhone.length < 10 || extractedPhone.length > 15) {
         for (let col = 0; col < row.length; col++) {
-          const raw = String(row[col] || "").trim();
-          const digits = raw.replace(/\D/g, "");
-          if (digits.length >= 10 && digits.length <= 15) {
-            extractedPhone = digits;
-            if (!extractedName && col > 0 && typeof row[col - 1] === "string") {
-              extractedName = String(row[col - 1]).trim();
-            } else if (!extractedName && col + 1 < row.length && typeof row[col + 1] === "string") {
-              extractedName = String(row[col + 1]).trim();
-            }
+          if (col === nameIdx || col === cityIdx) continue;
+          const candidate = parseCellPhone(row[col]);
+          if (candidate.length >= 10 && candidate.length <= 15) {
+            extractedPhone = candidate;
             break;
           }
         }
       }
 
-      const cleanPhone = cleanPhoneNumber(extractedPhone);
-      if (cleanPhone.length >= 10 && cleanPhone.length <= 15) {
+      if (extractedPhone.length >= 10 && extractedPhone.length <= 15) {
         contactsToSave.push({
-          name: (extractedName || `Contact ${cleanPhone.slice(-4)}`).slice(0, 255),
-          phone: cleanPhone,
+          phone: extractedPhone,
+          name: (extractedName || `Contact ${extractedPhone.slice(-4)}`).slice(0, 255),
           city: (extractedCity || "").slice(0, 255),
         });
       }
@@ -203,43 +262,56 @@ router.post("/", upload.single("file"), async (req, res) => {
     );
     const list = listResult.rows[0];
 
+    // High-speed Batched Bulk Insert in chunks of 500
+    const BATCH_SIZE = 500;
     let addedCount = 0;
-    for (const contact of uniqueContacts) {
-      try {
-        const contactResult = await db.query(
-          `INSERT INTO contacts (phone_number, name, city, user_id)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (phone_number) DO UPDATE SET 
-             name = COALESCE(NULLIF(EXCLUDED.name, ''), contacts.name),
-             city = COALESCE(NULLIF(EXCLUDED.city, ''), contacts.city),
-             user_id = COALESCE(contacts.user_id, EXCLUDED.user_id)
-           RETURNING id`,
-          [contact.phone, contact.name, contact.city, effectiveUserId]
-        );
+    for (let i = 0; i < uniqueContacts.length; i += BATCH_SIZE) {
+      const chunk = uniqueContacts.slice(i, i + BATCH_SIZE);
+      const phones = chunk.map((c) => c.phone);
+      const names = chunk.map((c) => c.name);
+      const cities = chunk.map((c) => c.city);
+      const userIds = chunk.map(() => effectiveUserId);
 
-        const contactId = contactResult.rows[0].id;
-        await db.query(
-          `INSERT INTO contact_list_members (list_id, contact_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-          [list.id, contactId]
-        );
-        addedCount++;
-      } catch (insertErr) {
-        console.warn("Failed to insert contact member:", insertErr.message);
-      }
+      const batchQuery = `
+        WITH inserted AS (
+          INSERT INTO public.contacts (phone_number, name, city, user_id)
+          SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::uuid[])
+          ON CONFLICT (phone_number) DO UPDATE SET 
+            name = COALESCE(NULLIF(EXCLUDED.name, ''), contacts.name),
+            city = COALESCE(NULLIF(EXCLUDED.city, ''), contacts.city),
+            user_id = COALESCE(contacts.user_id, EXCLUDED.user_id)
+          RETURNING id
+        )
+        INSERT INTO public.contact_list_members (list_id, contact_id)
+        SELECT $5::uuid, id FROM inserted
+        ON CONFLICT DO NOTHING
+        RETURNING contact_id;
+      `;
+      const result = await db.query(batchQuery, [phones, names, cities, userIds, list.id]);
+      addedCount += result.rowCount || chunk.length;
+    }
+
+    const payload = {
+      id: list.id,
+      name: list.name,
+      member_count: addedCount,
+      user_id: effectiveUserId,
+      created_at: list.created_at,
+    };
+
+    // Real-time Socket.IO Broadcast to all connected clients & dashboards
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("contact_list_created", { list: payload });
     }
 
     res.status(201).json({
       message: "Contact list saved successfully",
-      list: {
-        id: list.id,
-        name: list.name,
-        member_count: addedCount,
-        created_at: list.created_at,
-      },
+      list: payload,
     });
   } catch (err) {
     console.error("❌ Contact list creation error:", err);
-    res.status(500).json({ error: "Failed to process contact list upload." });
+    res.status(500).json({ error: "Failed to process contact list upload: " + (err.message || "") });
   }
 });
 
@@ -254,19 +326,28 @@ router.post("/manual", express.json(), async (req, res) => {
       return res.status(400).json({ error: "List name is required" });
     }
 
+    const effectiveUserId = req.targetUserId || req.user?.id || null;
     const listResult = await db.query(
-      `INSERT INTO contact_lists (name) VALUES ($1) RETURNING *`,
-      [name.trim().slice(0, 255)]
+      `INSERT INTO contact_lists (name, user_id) VALUES ($1, $2) RETURNING *`,
+      [name.trim().slice(0, 255), effectiveUserId]
     );
+
+    const payload = {
+      id: listResult.rows[0].id,
+      name: listResult.rows[0].name,
+      member_count: 0,
+      user_id: effectiveUserId,
+      created_at: listResult.rows[0].created_at,
+    };
+
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("contact_list_created", { list: payload });
+    }
 
     res.status(201).json({
       message: "Empty contact list created successfully",
-      list: {
-        id: listResult.rows[0].id,
-        name: listResult.rows[0].name,
-        member_count: 0,
-        created_at: listResult.rows[0].created_at,
-      },
+      list: payload,
     });
   } catch (err) {
     console.error("❌ Manual list creation error:", err);
@@ -376,6 +457,11 @@ router.delete("/:id", async (req, res) => {
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Contact list not found." });
+    }
+
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("contact_list_deleted", { id });
     }
 
     res.json({ message: "Contact list deleted successfully" });

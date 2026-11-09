@@ -5,8 +5,11 @@ const os = require("os");
 const fs = require("fs");
 const db = require("../db");
 const { getTemplates, createTemplate } = require("../services/metaApi");
-const { getUserMetaConfig } = require("../middleware/authMiddleware");
+const { getUserMetaConfig, authenticate } = require("../middleware/authMiddleware");
 const { validateTemplatePolicy } = require("../services/metaPolicyGuard");
+
+// Enforce JWT authentication on all template operations
+router.use(authenticate);
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -43,7 +46,12 @@ router.get("/", async (req, res) => {
       templateCacheMap.set(cacheKey, { data: templates, time: now });
     }
 
-    // STRICT CLIENT TEMPLATE ISOLATION
+    // If tenant has configured their own personal Meta WABA, all templates belong to them
+    if (customConfig && customConfig.wabaId) {
+      return res.json(templates);
+    }
+
+    // STRICT CLIENT TEMPLATE ISOLATION FOR COMPANY WABA MODE
     // If client user (or Master Admin viewing a specific client), ONLY return templates owned by this client!
     const effectiveUserId = req.targetUserId || req.user?.id;
     const isMaster = req.user?.role === "master_admin" || (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
