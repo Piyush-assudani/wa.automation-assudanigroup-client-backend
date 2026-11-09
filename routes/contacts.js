@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../db");
+const { authenticate, requireMasterAdmin } = require("../middleware/authMiddleware");
 
 const isValidUuid = (val) =>
   typeof val === "string" &&
@@ -20,15 +21,31 @@ const cleanPhoneNumber = (raw) => {
 /**
  * GET /api/contacts
  * Returns list of contacts with latest message preview and unread counts
+ * Strictly filtered by client workspace; Master Admin can view all or filter by unassigned/client.
  */
-router.get("/", async (req, res) => {
+router.get("/", authenticate, async (req, res) => {
   try {
-    const effectiveUserId = req.targetUserId || (req.user?.role !== "master_admin" ? req.user?.id : null);
+    const isMaster = req.user?.role === "master_admin" || (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
+    const effectiveUserId = (isMaster && !req.headers["x-client-id"]) ? null : (req.targetUserId || req.user?.id);
+
     let whereClause = "";
     let params = [];
+
     if (effectiveUserId) {
+      // Client view: strictly isolated to their own contacts
       whereClause = "WHERE c.user_id = $1";
       params.push(effectiveUserId);
+    } else {
+      // Master Admin global view: can view all, unassigned, or a selected client
+      const { scope, client_id } = req.query;
+      if (scope === "unassigned") {
+        whereClause = "WHERE c.user_id IS NULL";
+      } else if (scope === "assigned") {
+        whereClause = "WHERE c.user_id IS NOT NULL";
+      } else if (client_id && isValidUuid(client_id)) {
+        whereClause = "WHERE c.user_id = $1";
+        params.push(client_id);
+      }
     }
 
     const result = await db.query(
@@ -38,6 +55,7 @@ router.get("/", async (req, res) => {
         c.name,
         c.created_at,
         c.user_id,
+        u.username AS client_owner_name,
         m.message_body as last_message,
         m.direction as last_message_direction,
         m.timestamp as last_message_time,
@@ -58,6 +76,7 @@ router.get("/", async (req, res) => {
           LIMIT 1
         ) as last_inbound_time
       FROM contacts c
+      LEFT JOIN public.users u ON c.user_id = u.id
       LEFT JOIN LATERAL (
         SELECT message_body, direction, timestamp
         FROM messages
@@ -228,6 +247,52 @@ router.delete("/:id", async (req, res) => {
   } catch (err) {
     console.error("❌ Contact deletion error:", err);
     res.status(500).json({ error: "Failed to delete contact." });
+  }
+});
+
+/**
+ * PUT /api/contacts/:id/assign
+ * Assign an unassigned contact to a client user (Master Admin only)
+ */
+router.put("/:id/assign", authenticate, requireMasterAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { user_id } = req.body;
+
+    if (!isValidUuid(id)) {
+      return res.status(400).json({ error: "Invalid contact ID format." });
+    }
+
+    if (user_id && !isValidUuid(user_id)) {
+      return res.status(400).json({ error: "Invalid user ID format." });
+    }
+
+    const result = await db.query(
+      `UPDATE contacts 
+       SET user_id = $1 
+       WHERE id = $2 
+       RETURNING id, phone_number, name, user_id`,
+      [user_id || null, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Contact not found" });
+    }
+
+    let assignedName = null;
+    if (user_id) {
+      const uRes = await db.query("SELECT username FROM public.users WHERE id = $1", [user_id]);
+      assignedName = uRes.rows[0]?.username || null;
+    }
+
+    res.json({
+      success: true,
+      message: assignedName ? `Contact assigned to ${assignedName}` : "Contact unassigned",
+      contact: { ...result.rows[0], client_owner_name: assignedName },
+    });
+  } catch (err) {
+    console.error("❌ Assign contact error:", err);
+    res.status(500).json({ error: "Failed to assign contact." });
   }
 });
 

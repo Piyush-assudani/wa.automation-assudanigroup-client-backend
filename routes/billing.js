@@ -4,11 +4,12 @@ const db = require("../db");
 const { authenticate, requireMasterAdmin } = require("../middleware/authMiddleware");
 
 // Rates per message category (in INR)
+// Meta provides 1,000 free service / customer-initiated conversations every month per WABA.
 const RATES = {
   marketing: 0.85,
   utility: 0.35,
   authentication: 0.30,
-  service: 0.30,
+  service: 0.00, // 1,000 Free Customer-Initiated Conversations / month per Meta Official Policy
 };
 
 /**
@@ -31,9 +32,52 @@ async function checkAndDeductMessageFund(userId, options = {}) {
     customDescription = null,
   } = options;
 
-  const cost = RATES[category] || 0.85;
+  const cost = RATES[category] !== undefined ? RATES[category] : 0.85;
 
-  // Fetch current balance
+  // Handle Meta 24-hour Free Tier (1,000 free service/customer care conversations / month per WABA)
+  if (cost === 0) {
+    const userRes = await db.query(
+      "SELECT id, username, wallet_balance, currency FROM public.users WHERE id = $1",
+      [userId]
+    );
+
+    if (userRes.rows.length === 0) {
+      return { allowed: false, error: "User account not found." };
+    }
+
+    const currentBalance = parseFloat(userRes.rows[0]?.wallet_balance || 0);
+    const description =
+      customDescription ||
+      `Service Reply to ${recipientName || recipientPhone || "Customer"} (Meta 24h Free Tier)`;
+
+    // Record ₹0.00 ledger audit entry without deducting wallet balance
+    const txRes = await db.query(
+      `INSERT INTO public.wallet_transactions 
+        (user_id, type, amount, balance_after, description, message_id, campaign_id, recipient_phone, recipient_name, category, status, created_at)
+       VALUES ($1, 'debit', 0.00, $2, $3, $4, $5, $6, $7, $8, 'completed', NOW())
+       RETURNING id`,
+      [
+        userId,
+        currentBalance,
+        description,
+        messageId,
+        campaignId,
+        recipientPhone,
+        recipientName,
+        category,
+      ]
+    );
+
+    return {
+      allowed: true,
+      txId: txRes.rows[0]?.id,
+      cost: 0.00,
+      newBalance: currentBalance,
+      isFreeTier: true,
+    };
+  }
+
+  // Fetch current balance for paid message categories (Marketing ₹0.85, Utility ₹0.35, Auth ₹0.30)
   const userRes = await db.query(
     "SELECT id, username, wallet_balance, currency FROM public.users WHERE id = $1 FOR UPDATE",
     [userId]
@@ -89,6 +133,7 @@ async function checkAndDeductMessageFund(userId, options = {}) {
     txId: txRes.rows[0]?.id,
     cost,
     newBalance,
+    isFreeTier: false,
   };
 }
 
@@ -106,7 +151,12 @@ async function refundMessageFund(userId, txId, reason = "Message Delivery Failed
 
     if (txRes.rows.length === 0) return false;
     const tx = txRes.rows[0];
-    const refundAmount = parseFloat(tx.amount);
+    const refundAmount = parseFloat(tx.amount || 0);
+
+    if (refundAmount <= 0) {
+      await db.query("UPDATE public.wallet_transactions SET status = 'refunded' WHERE id = $1", [txId]);
+      return true;
+    }
 
     const userRes = await db.query(
       "SELECT wallet_balance FROM public.users WHERE id = $1 FOR UPDATE",

@@ -140,14 +140,57 @@ router.post("/", async (req, res) => {
                 }
               }
 
-              // Upsert contact
+              // Determine client ownership for inbound message (Strict Multi-Tenant Routing)
+              let assignedUserId = null;
+              const existingContact = await db.query(
+                "SELECT id, name, user_id FROM contacts WHERE phone_number = $1",
+                [from]
+              );
+
+              if (existingContact.rows.length > 0 && existingContact.rows[0].user_id) {
+                assignedUserId = existingContact.rows[0].user_id;
+              } else {
+                // If contact is not yet assigned, check if any client recently messaged this number via campaigns
+                const lastSender = await db.query(
+                  `SELECT cmp.user_id 
+                   FROM messages m 
+                   JOIN campaigns cmp ON m.campaign_id = cmp.id 
+                   JOIN contacts c ON m.contact_id = c.id 
+                   WHERE c.phone_number = $1 
+                   ORDER BY m.timestamp DESC NULLS LAST 
+                   LIMIT 1`,
+                  [from]
+                );
+
+                if (lastSender.rows.length > 0 && lastSender.rows[0].user_id) {
+                  assignedUserId = lastSender.rows[0].user_id;
+                } else {
+                  // Fallback: Check if this phone number is inside any client's contact list
+                  const listOwner = await db.query(
+                    `SELECT cl.user_id 
+                     FROM contact_list_members clm 
+                     JOIN contact_lists cl ON clm.list_id = cl.id 
+                     WHERE clm.phone = $1 OR clm.phone = $2 
+                     ORDER BY clm.created_at DESC 
+                     LIMIT 1`,
+                    [from, from.replace(/^91/, "")]
+                  );
+                  if (listOwner.rows.length > 0 && listOwner.rows[0].user_id) {
+                    assignedUserId = listOwner.rows[0].user_id;
+                  }
+                }
+              }
+
+              // Upsert contact with determined client user_id (or NULL for unprompted direct strangers)
               const contactResult = await db.query(
-                `INSERT INTO contacts (phone_number, name)
-                 VALUES ($1, $2)
+                `INSERT INTO contacts (phone_number, name, user_id)
+                 VALUES ($1, $2, $3)
                  ON CONFLICT (phone_number)
-                 DO UPDATE SET name = COALESCE($2, contacts.name)
-                 RETURNING id, phone_number, name`,
-                [from, contactName]
+                 DO UPDATE SET 
+                   name = COALESCE($2, contacts.name),
+                   user_id = COALESCE(contacts.user_id, EXCLUDED.user_id)
+                 RETURNING id, phone_number, name, user_id`,
+                [from, contactName, assignedUserId]
               );
               const contact = contactResult.rows[0];
 
@@ -161,7 +204,7 @@ router.post("/", async (req, res) => {
 
               const savedMessage = msgResult.rows[0];
 
-              // Emit via Socket.IO
+              // Emit via Socket.IO with multi-tenant contact_user_id
               const io = req.app.get("io");
               if (io) {
                 io.emit("new_message", {
@@ -169,6 +212,7 @@ router.post("/", async (req, res) => {
                   contact_id: contact.id,
                   contact_phone: contact.phone_number,
                   contact_name: contact.name,
+                  contact_user_id: contact.user_id,
                   direction: "inbound",
                   message_body: messageBody,
                   media_url: mediaUrl,
