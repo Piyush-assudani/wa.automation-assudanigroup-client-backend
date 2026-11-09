@@ -15,12 +15,12 @@ router.use(authenticate);
  */
 router.get("/clients-dropdown", requireAdmin, async (req, res) => {
   try {
+    // Only return actual client accounts. Master Admin (Piyush Assudani) is the platform admin, not a client.
     const result = await db.query(`
       SELECT id, username, role, whatsapp_mode, meta_display_phone_number, meta_verified_name
       FROM public.users
-      ORDER BY 
-        CASE WHEN role = 'master_admin' THEN 1 WHEN role = 'admin' THEN 2 ELSE 3 END,
-        username ASC
+      WHERE role NOT IN ('master_admin') AND LOWER(username) != 'piyushassudani'
+      ORDER BY username ASC
     `);
     return res.json({ clients: result.rows });
   } catch (err) {

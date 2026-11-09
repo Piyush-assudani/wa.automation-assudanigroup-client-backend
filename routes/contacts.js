@@ -55,7 +55,7 @@ router.get("/", authenticate, async (req, res) => {
         c.name,
         c.created_at,
         c.user_id,
-        u.username AS client_owner_name,
+        CASE WHEN LOWER(u.username) = 'piyushassudani' THEN NULL ELSE u.username END AS client_owner_name,
         m.message_body as last_message,
         m.direction as last_message_direction,
         m.timestamp as last_message_time,
@@ -156,7 +156,8 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "A contact with this phone number already exists." });
     }
 
-    const effectiveUserId = req.targetUserId || req.user?.id || null;
+    const isMaster = req.user?.role === "master_admin" || (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
+    const effectiveUserId = (isMaster && !req.headers["x-client-id"]) ? null : (req.targetUserId || req.user?.id || null);
     const safeName = (typeof name === "string" ? name.trim().slice(0, 255) : "") || "Unknown";
     const safeCity = typeof city === "string" ? city.trim().slice(0, 255) : "";
 
