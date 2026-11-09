@@ -285,7 +285,18 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
  */
 router.get("/", async (req, res) => {
   try {
-    const effectiveUserId = req.targetUserId || (req.user?.role !== "master_admin" ? req.user?.id : null);
+    const isMaster =
+      req.user?.role === "master_admin" ||
+      (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
+    const targetClientId = req.headers["x-client-id"] || req.query.client_id;
+
+    let effectiveUserId = null;
+    if (isMaster && targetClientId && targetClientId !== "all") {
+      effectiveUserId = targetClientId;
+    } else if (!isMaster) {
+      effectiveUserId = req.targetUserId || req.user?.id;
+    }
+
     let whereClause = "";
     let params = [];
     if (effectiveUserId) {
@@ -296,14 +307,16 @@ router.get("/", async (req, res) => {
     const result = await db.query(
       `SELECT
         c.*,
+        u.username as client_username,
         COUNT(m.id) as total_messages,
         COUNT(CASE WHEN m.status = 'delivered' THEN 1 END) as total_delivered,
         COUNT(CASE WHEN m.status = 'read' THEN 1 END) as total_read,
         COUNT(CASE WHEN m.status = 'failed' THEN 1 END) as total_failed
-      FROM campaigns c
-      LEFT JOIN messages m ON m.campaign_id = c.id
+      FROM public.campaigns c
+      LEFT JOIN public.users u ON c.user_id = u.id
+      LEFT JOIN public.messages m ON m.campaign_id = c.id
       ${whereClause}
-      GROUP BY c.id
+      GROUP BY c.id, u.username
       ORDER BY c.created_at DESC`,
       params
     );

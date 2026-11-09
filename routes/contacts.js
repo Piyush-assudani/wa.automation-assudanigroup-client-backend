@@ -51,7 +51,15 @@ router.get("/", authenticate, async (req, res) => {
       } else if (scope === "assigned") {
         whereClause = "WHERE c.user_id IS NOT NULL";
       } else if (client_id && isValidUuid(client_id)) {
-        whereClause = "WHERE c.user_id = $1";
+        whereClause = `WHERE (
+          c.user_id = $1 
+          OR c.id IN (
+            SELECT DISTINCT m_sub.contact_id 
+            FROM public.messages m_sub 
+            JOIN public.campaigns cmp_sub ON m_sub.campaign_id = cmp_sub.id 
+            WHERE cmp_sub.user_id = $1
+          )
+        )`;
         params.push(client_id);
       }
     }

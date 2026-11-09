@@ -4,6 +4,9 @@ const multer = require("multer");
 const XLSX = require("xlsx");
 const db = require("../db");
 const { uploadExcelToSupabase } = require("../services/supabaseService");
+const { authenticate } = require("../middleware/authMiddleware");
+
+router.use(authenticate);
 
 const isValidUuid = (val) =>
   typeof val === "string" &&
@@ -31,7 +34,18 @@ const upload = multer({
  */
 router.get("/", async (req, res) => {
   try {
-    const effectiveUserId = req.targetUserId || (req.user?.role !== "master_admin" ? req.user?.id : null);
+    const isMaster =
+      req.user?.role === "master_admin" ||
+      (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
+    const targetClientId = req.headers["x-client-id"] || req.query.client_id;
+
+    let effectiveUserId = null;
+    if (isMaster && targetClientId && targetClientId !== "all") {
+      effectiveUserId = targetClientId;
+    } else if (!isMaster) {
+      effectiveUserId = req.targetUserId || req.user?.id;
+    }
+
     let whereClause = "";
     let params = [];
     if (effectiveUserId) {
@@ -40,11 +54,12 @@ router.get("/", async (req, res) => {
     }
 
     const result = await db.query(
-      `SELECT cl.*, COUNT(clm.contact_id) as member_count
-       FROM contact_lists cl
-       LEFT JOIN contact_list_members clm ON cl.id = clm.list_id
+      `SELECT cl.*, u.username as client_username, COUNT(clm.contact_id) as member_count
+       FROM public.contact_lists cl
+       LEFT JOIN public.users u ON cl.user_id = u.id
+       LEFT JOIN public.contact_list_members clm ON cl.id = clm.list_id
        ${whereClause}
-       GROUP BY cl.id
+       GROUP BY cl.id, u.username
        ORDER BY cl.created_at DESC`,
       params
     );

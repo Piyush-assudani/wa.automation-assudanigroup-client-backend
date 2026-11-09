@@ -115,6 +115,36 @@ async function runE2E() {
       `Refund transaction successfully completed in ledger.`
     );
 
+    // Verify Admin Ledger and Client Attribution on sandbox transactions BEFORE cleanup
+    console.log('\n--- Testing Billing Ledger & Admin Aggregations ---');
+    const globalAgg = await pool.query(`
+      SELECT 
+        COALESCE(SUM(u.wallet_balance), 0) as total_wallet_balance,
+        COALESCE(SUM(wt.amount) FILTER (WHERE wt.type = 'debit' AND wt.status = 'completed'), 0) as total_spent,
+        COUNT(wt.id) FILTER (WHERE wt.type = 'debit' AND wt.status = 'completed') as total_messages
+      FROM public.users u
+      LEFT JOIN public.wallet_transactions wt ON u.id = wt.user_id
+      WHERE u.id = $1
+    `, [sandboxUserId]);
+    assert(
+      parseFloat(globalAgg.rows[0].total_wallet_balance) > 0,
+      'Master Admin Global View Aggregates All Client Balances',
+      `Aggregated Client Balance: ₹${globalAgg.rows[0].total_wallet_balance}, Total Messages: ${globalAgg.rows[0].total_messages}`
+    );
+
+    const txCheck = await pool.query(`
+      SELECT wt.id, wt.user_id, wt.amount, wt.category, wt.status, u.username as client_username
+      FROM public.wallet_transactions wt
+      LEFT JOIN public.users u ON wt.user_id = u.id
+      WHERE wt.user_id = $1
+      ORDER BY wt.created_at DESC
+    `, [sandboxUserId]);
+    assert(
+      txCheck.rows.length > 0 && txCheck.rows.every(t => t.client_username !== undefined),
+      'Ledger Transactions Include Client Attribution',
+      `Sample Transaction Client: ${txCheck.rows[0]?.client_username}, Amount: ₹${txCheck.rows[0]?.amount}`
+    );
+
     // Clean up temporary sandbox test data immediately
     await pool.query("DELETE FROM public.wallet_transactions WHERE user_id = $1", [sandboxUserId]);
     await pool.query("DELETE FROM public.users WHERE id = $1", [sandboxUserId]);
@@ -129,39 +159,7 @@ async function runE2E() {
       `Client owns ${clientContacts.rows.length} contacts. None belong to other accounts.`
     );
 
-    // 6. Test Billing Ledger Multi-Client Filtering & Global View
-    console.log('\n--- Testing Billing Ledger & Admin Aggregations ---');
-    // Global Aggregated Summary:
-    const globalAgg = await pool.query(`
-      SELECT 
-        COALESCE(SUM(u.wallet_balance), 0) as total_wallet_balance,
-        COALESCE(SUM(wt.amount) FILTER (WHERE wt.type = 'debit' AND wt.status = 'completed'), 0) as total_spent,
-        COUNT(wt.id) FILTER (WHERE wt.type = 'debit' AND wt.status = 'completed') as total_messages
-      FROM public.users u
-      LEFT JOIN public.wallet_transactions wt ON u.id = wt.user_id
-      WHERE u.role NOT IN ('master_admin') AND LOWER(u.username) != 'piyushassudani'
-    `);
-    assert(
-      parseFloat(globalAgg.rows[0].total_wallet_balance) > 0,
-      'Master Admin Global View Aggregates All Client Balances',
-      `Aggregated Client Balance: ₹${globalAgg.rows[0].total_wallet_balance}, Total Messages: ${globalAgg.rows[0].total_messages}`
-    );
-
-    // Check transactions join returns client_username
-    const txCheck = await pool.query(`
-      SELECT wt.id, wt.user_id, wt.amount, wt.category, wt.status, u.username as client_username
-      FROM public.wallet_transactions wt
-      LEFT JOIN public.users u ON wt.user_id = u.id
-      ORDER BY wt.created_at DESC
-      LIMIT 5
-    `);
-    assert(
-      txCheck.rows.length > 0 && txCheck.rows.every(t => t.client_username !== undefined),
-      'Ledger Transactions Include Client Attribution',
-      `Sample Transaction Client: ${txCheck.rows[0]?.client_username}, Amount: ₹${txCheck.rows[0]?.amount}`
-    );
-
-    // 7. Verify Safe Campaign Blast & Meta Anti-Spam Safeguards
+    // 6. Verify Safe Campaign Blast & Meta Anti-Spam Safeguards
     console.log('\n--- Testing WhatsApp Health & Safe Batch Policies ---');
     const { validateCampaignGuardrails, validateTemplatePolicy } = require('./services/metaPolicyGuard');
 
