@@ -413,17 +413,21 @@ router.get("/admin/clients", authenticate, requireMasterAdmin, async (req, res) 
  * POST /api/billing/recharge
  * Master Admin only: recharge funds for any client
  */
+/**
+ * POST /api/billing/recharge
+ * Master Admin can credit (add) or debit (deduct/reduce) funds from any client wallet
+ */
 router.post("/recharge", authenticate, requireMasterAdmin, async (req, res) => {
   try {
-    const { user_id, amount, description = "Admin Wallet Recharge" } = req.body || {};
+    const { user_id, amount, description = "", action = "add" } = req.body || {};
 
     if (!user_id) {
       return res.status(400).json({ error: "Client user_id is required." });
     }
 
-    const rechargeAmount = parseFloat(amount);
-    if (isNaN(rechargeAmount) || rechargeAmount <= 0) {
-      return res.status(400).json({ error: "Recharge amount must be a positive number." });
+    const adjustAmount = parseFloat(amount);
+    if (isNaN(adjustAmount) || adjustAmount <= 0) {
+      return res.status(400).json({ error: "Amount must be a positive number." });
     }
 
     const userRes = await db.query(
@@ -437,16 +441,35 @@ router.post("/recharge", authenticate, requireMasterAdmin, async (req, res) => {
 
     const client = userRes.rows[0];
     const currentBalance = parseFloat(client.wallet_balance || 0);
-    const newBalance = Math.round((currentBalance + rechargeAmount) * 100) / 100;
+
+    let newBalance;
+    let txType;
+    let defaultDesc;
+    const isDeduct = action === "deduct";
+
+    if (isDeduct) {
+      if (currentBalance < adjustAmount) {
+        return res.status(400).json({
+          error: `Cannot deduct ₹${adjustAmount.toFixed(2)}. Client only has ₹${currentBalance.toFixed(2)} available.`,
+        });
+      }
+      newBalance = Math.round((currentBalance - adjustAmount) * 100) / 100;
+      txType = "debit";
+      defaultDesc = description.trim() || `Fund deduction by Admin (-₹${adjustAmount.toFixed(2)})`;
+    } else {
+      newBalance = Math.round((currentBalance + adjustAmount) * 100) / 100;
+      txType = "credit";
+      defaultDesc = description.trim() || `Wallet recharge by Admin (+₹${adjustAmount.toFixed(2)})`;
+    }
 
     await db.query("UPDATE public.users SET wallet_balance = $1 WHERE id = $2", [newBalance, user_id]);
 
     const txRes = await db.query(
       `INSERT INTO public.wallet_transactions 
         (user_id, type, amount, balance_after, description, category, status, created_at)
-       VALUES ($1, 'credit', $2, $3, $4, 'service', 'completed', NOW())
+       VALUES ($1, $2, $3, $4, $5, 'service', 'completed', NOW())
        RETURNING id`,
-      [user_id, rechargeAmount, newBalance, description.trim() || `Recharged by Admin (+₹${rechargeAmount.toFixed(2)})`]
+      [user_id, txType, adjustAmount, newBalance, defaultDesc]
     );
 
     // Emit realtime Socket.io update
@@ -455,20 +478,23 @@ router.post("/recharge", authenticate, requireMasterAdmin, async (req, res) => {
       io.emit("wallet_updated", {
         user_id,
         new_balance: newBalance,
-        amount: rechargeAmount,
-        type: "credit",
+        amount: adjustAmount,
+        type: txType,
         tx_id: txRes.rows[0]?.id,
       });
     }
 
     res.json({
-      message: `Successfully credited ₹${rechargeAmount.toFixed(2)} to ${client.username}! New balance is ₹${newBalance.toFixed(2)}.`,
+      message: isDeduct
+        ? `Successfully deducted ₹${adjustAmount.toFixed(2)} from ${client.username}! New balance is ₹${newBalance.toFixed(2)}.`
+        : `Successfully credited ₹${adjustAmount.toFixed(2)} to ${client.username}! New balance is ₹${newBalance.toFixed(2)}.`,
       user_id,
       new_balance: newBalance,
+      action: isDeduct ? "deduct" : "add",
     });
   } catch (err) {
-    console.error("Recharge error:", err);
-    res.status(500).json({ error: "Failed to recharge client wallet." });
+    console.error("Recharge/adjustment error:", err);
+    res.status(500).json({ error: "Failed to process wallet fund adjustment." });
   }
 });
 

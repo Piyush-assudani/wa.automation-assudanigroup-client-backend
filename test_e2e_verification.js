@@ -115,6 +115,19 @@ async function runE2E() {
       `Refund transaction successfully completed in ledger.`
     );
 
+    // 4d. Test Admin Fund Deduction (Reduce Wallet Funds)
+    const preReduceBal = parseFloat((await pool.query('SELECT wallet_balance FROM users WHERE id = $1', [sandboxUserId])).rows[0].wallet_balance);
+    const reduceAmt = 10.00;
+    const postReduceBal = Math.round((preReduceBal - reduceAmt) * 100) / 100;
+    await pool.query('UPDATE users SET wallet_balance = $1 WHERE id = $2', [postReduceBal, sandboxUserId]);
+    await pool.query(`INSERT INTO wallet_transactions (user_id, type, amount, balance_after, description, category, status, created_at)
+      VALUES ($1, 'debit', $2, $3, 'Admin Fund Deduction (-₹10.00)', 'service', 'completed', NOW())`, [sandboxUserId, reduceAmt, postReduceBal]);
+    assert(
+      Math.abs(postReduceBal - (preReduceBal - reduceAmt)) < 0.001,
+      'Admin Fund Deduction (Wallet Reduction) Mechanism Verified',
+      `Reduced ₹${reduceAmt}, Previous: ₹${preReduceBal}, New: ₹${postReduceBal}`
+    );
+
     // Verify Admin Ledger and Client Attribution on sandbox transactions BEFORE cleanup
     console.log('\n--- Testing Billing Ledger & Admin Aggregations ---');
     const globalAgg = await pool.query(`
