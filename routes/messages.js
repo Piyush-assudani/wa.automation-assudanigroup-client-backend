@@ -41,17 +41,55 @@ const upload = multer({
 
 /**
  * GET /api/messages/inbound
- * Fetch recent inbound messages across all contacts
+ * Fetch recent inbound messages scoped strictly to the requesting client
  */
 router.get("/inbound", async (req, res) => {
   try {
+    const isMaster =
+      req.user?.role === "master_admin" ||
+      (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
+    const targetClientId = req.headers["x-client-id"];
+
+    let effectiveUserId = null;
+    if (isMaster && targetClientId && targetClientId !== "all") {
+      effectiveUserId = targetClientId;
+    } else if (!isMaster) {
+      effectiveUserId = req.targetUserId || req.user?.id;
+    }
+
+    let whereClause = "WHERE m.direction = 'inbound'";
+    let params = [];
+
+    // STRICT MULTI-TENANT FILTERING:
+    // Only return inbound callbacks/replies from contacts that belong to this client
+    // or who were messaged in this client's campaigns!
+    if (effectiveUserId) {
+      whereClause += ` AND (
+        c.user_id = $1
+        OR c.id IN (
+          SELECT clm.contact_id
+          FROM public.contact_list_members clm
+          JOIN public.contact_lists cl ON clm.list_id = cl.id
+          WHERE cl.user_id = $1
+        )
+        OR c.id IN (
+          SELECT DISTINCT m_sub.contact_id 
+          FROM public.messages m_sub 
+          JOIN public.campaigns cmp_sub ON m_sub.campaign_id = cmp_sub.id 
+          WHERE cmp_sub.user_id = $1
+        )
+      )`;
+      params.push(effectiveUserId);
+    }
+
     const result = await db.query(
       `SELECT m.*, c.phone_number, c.name
        FROM messages m
        JOIN contacts c ON m.contact_id = c.id
-       WHERE m.direction = 'inbound'
+       ${whereClause}
        ORDER BY m.timestamp DESC
-       LIMIT 100`
+       LIMIT 100`,
+      params
     );
     res.json(result.rows);
   } catch (err) {
@@ -62,7 +100,7 @@ router.get("/inbound", async (req, res) => {
 
 /**
  * GET /api/messages/:contactId
- * Fetch paginated messages for a specific contact
+ * Fetch paginated messages for a specific contact with tenant access check
  */
 router.get("/:contactId", async (req, res) => {
   try {
@@ -71,6 +109,40 @@ router.get("/:contactId", async (req, res) => {
 
     if (!isValidUuid(contactId)) {
       return res.status(400).json({ error: "Invalid contact ID format." });
+    }
+
+    const isMaster =
+      req.user?.role === "master_admin" ||
+      (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
+    const targetClientId = req.headers["x-client-id"];
+
+    let effectiveUserId = null;
+    if (isMaster && targetClientId && targetClientId !== "all") {
+      effectiveUserId = targetClientId;
+    } else if (!isMaster) {
+      effectiveUserId = req.targetUserId || req.user?.id;
+    }
+
+    // Security check: Verify contact ownership / participation
+    if (effectiveUserId) {
+      const allowed = await db.query(
+        `SELECT 1 FROM contacts c
+         WHERE c.id = $1 AND (
+           c.user_id = $2
+           OR c.id IN (
+             SELECT clm.contact_id FROM contact_list_members clm
+             JOIN contact_lists cl ON clm.list_id = cl.id WHERE cl.user_id = $2
+           )
+           OR c.id IN (
+             SELECT DISTINCT m2.contact_id FROM messages m2
+             JOIN campaigns cmp ON m2.campaign_id = cmp.id WHERE cmp.user_id = $2
+           )
+         )`,
+        [contactId, effectiveUserId]
+      );
+      if (allowed.rows.length === 0) {
+        return res.status(403).json({ error: "Access denied. You do not have permission to view messages for this contact." });
+      }
     }
 
     const contactResult = await db.query(`SELECT * FROM contacts WHERE id = $1`, [contactId]);
