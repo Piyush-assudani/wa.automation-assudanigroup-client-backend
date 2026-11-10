@@ -4,6 +4,7 @@ const multer = require("multer");
 const db = require("../db");
 const { processCampaign } = require("../services/campaignProcessor");
 const { uploadFileToCloudinary } = require("../services/cloudinaryService");
+const { uploadFileToServer } = require("../services/localStorageService");
 const os = require("os");
 const path = require("path");
 const xlsx = require("xlsx");
@@ -24,7 +25,7 @@ const uploadMedia = multer({
       cb(null, `${Date.now()}-${file.originalname}`);
     },
   }),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB limit
+  limits: { fileSize: 64 * 1024 * 1024 }, // 64MB limit for video/image promo assets
 });
 
 /**
@@ -70,9 +71,10 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
     let requiredHeaderFormat = null;
     let resolvedLanguageCode = language_code || "en_US";
     let templateFetched = false;
+    const customConfig = await getUserMetaConfig(req);
 
     try {
-      const templates = await getTemplates();
+      const templates = await getTemplates(customConfig);
       const tpl = (templates || []).find((t) => t.name === template_name.trim());
       if (tpl) {
         templateFetched = true;
@@ -127,7 +129,7 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
         });
       }
 
-      media_id = await uploadMediaToMeta(req.file.path, req.file.mimetype);
+      media_id = await uploadMediaToMeta(req.file.path, req.file.mimetype, customConfig);
       if (!media_id) {
         return res.status(500).json({ error: "Failed to upload media to WhatsApp Meta API." });
       }
@@ -136,7 +138,14 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
         let resourceType = "auto";
         if (media_type === "image") resourceType = "image";
         if (media_type === "video") resourceType = "video";
-        media_url = await uploadFileToCloudinary(req.file.path, "wp_automation/campaigns", resourceType);
+        media_url = await uploadFileToServer(req.file.path, "campaigns", resourceType);
+
+        // Also register in media_assets library
+        db.query(
+          `INSERT INTO media_assets (original_name, media_url, meta_media_id, resource_type)
+           VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+          [req.file.originalname, media_url, media_id, media_type]
+        ).catch(() => {});
       } catch (uploadErr) {
         console.warn("Media storage upload skipped, proceeding with Meta ID:", uploadErr.message);
       }

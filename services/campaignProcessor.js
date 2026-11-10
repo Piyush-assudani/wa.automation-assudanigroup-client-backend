@@ -50,12 +50,13 @@ const initBullMQ = (io) => {
 
         let components = [];
         if (mediaType && (mediaId || mediaUrl)) {
+          const cleanMediaType = mediaType.toLowerCase();
           components.push({
             type: "header",
             parameters: [
               {
-                type: mediaType,
-                [mediaType]: mediaId ? { id: mediaId } : { link: mediaUrl },
+                type: cleanMediaType,
+                [cleanMediaType]: mediaId ? { id: mediaId } : { link: mediaUrl },
               },
             ],
           });
@@ -163,12 +164,13 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
 
   let components = [];
   if (mediaType && (mediaId || mediaUrl)) {
+    const cleanMediaType = mediaType.toLowerCase();
     components.push({
       type: "header",
       parameters: [
         {
-          type: mediaType,
-          [mediaType]: mediaId ? { id: mediaId } : { link: mediaUrl },
+          type: cleanMediaType,
+          [cleanMediaType]: mediaId ? { id: mediaId } : { link: mediaUrl },
         },
       ],
     });

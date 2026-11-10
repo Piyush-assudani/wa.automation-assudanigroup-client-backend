@@ -5,6 +5,7 @@ const multer = require("multer");
 const db = require("../db");
 const { uploadFileToServer, deleteFileFromServer } = require("../services/localStorageService");
 const { uploadMediaToMeta } = require("../services/metaApi");
+const { getUserMetaConfig } = require("../middleware/authMiddleware");
 const os = require("os");
 
 const isValidUuid = (val) =>
@@ -18,7 +19,7 @@ const upload = multer({
       cb(null, `${Date.now()}-${file.originalname}`);
     },
   }),
-  limits: { fileSize: 32 * 1024 * 1024 }, // 32MB limit for server storage
+  limits: { fileSize: 64 * 1024 * 1024 }, // 64MB limit for server storage and video uploads
 });
 
 // GET /api/media - list all media assets
@@ -54,7 +55,8 @@ router.post("/", upload.single("file"), async (req, res) => {
     // 1. Upload to Meta Cloud API (stream directly from temp file)
     let metaMediaId = null;
     try {
-      metaMediaId = await uploadMediaToMeta(req.file.path, req.file.mimetype);
+      const customConfig = await getUserMetaConfig(req).catch(() => null);
+      metaMediaId = await uploadMediaToMeta(req.file.path, req.file.mimetype, customConfig);
     } catch (metaErr) {
       console.warn("⚠️ Meta upload skipped/failed, saved to server storage:", metaErr.message);
     }

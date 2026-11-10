@@ -322,6 +322,11 @@ const DEFAULT_SAMPLE_PNG = Buffer.from(
 const DEFAULT_SAMPLE_PDF = Buffer.from(
   "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 3 3]>>endobj\nxref\n0 4\n0000000000 65535 f\n0000000009 00000 n\n0000000052 00000 n\n0000000101 00000 n\ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n147\n%%EOF\n"
 );
+// Minimal valid 0.5s MP4 video buffer for fallback video sample
+const DEFAULT_SAMPLE_MP4 = Buffer.from(
+  "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",
+  "base64"
+);
 
 const createSampleMediaHandle = async (fileBuffer, mimeType, fileName, customConfig = null) => {
   const { apiBase, token } = getMetaConfig(customConfig);
@@ -416,17 +421,17 @@ const createTemplate = async (
         });
       } else if (["IMAGE", "VIDEO", "DOCUMENT"].includes(headerType)) {
         let sampleBuffer = null;
-        let sampleMime = "image/png";
-        let sampleName = "sample.png";
+        let sampleMime = headerType === "VIDEO" ? "video/mp4" : headerType === "DOCUMENT" ? "application/pdf" : "image/png";
+        let sampleName = headerType === "VIDEO" ? "sample.mp4" : headerType === "DOCUMENT" ? "sample.pdf" : "sample.png";
 
         if (sampleFile && sampleFile.buffer) {
           sampleBuffer = sampleFile.buffer;
-          sampleMime = sampleFile.mimetype || "image/png";
-          sampleName = sampleFile.originalname || "sample";
+          sampleMime = sampleFile.mimetype || sampleMime;
+          sampleName = sampleFile.originalname || sampleName;
         } else if (sampleFile && sampleFile.path) {
           sampleBuffer = await fs.promises.readFile(sampleFile.path);
-          sampleMime = sampleFile.mimetype || "image/png";
-          sampleName = sampleFile.originalname || "sample";
+          sampleMime = sampleFile.mimetype || sampleMime;
+          sampleName = sampleFile.originalname || sampleName;
         } else if (sampleUrl && typeof sampleUrl === "string") {
           try {
             const publicBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
@@ -437,13 +442,20 @@ const createTemplate = async (
               if (fs.existsSync(localPath)) {
                 sampleBuffer = await fs.promises.readFile(localPath);
                 sampleName = match[2];
-                sampleMime = match[2].endsWith(".png") ? "image/png" : match[2].endsWith(".jpg") || match[2].endsWith(".jpeg") ? "image/jpeg" : "image/png";
+                const lower = match[2].toLowerCase();
+                if (lower.endsWith(".mp4")) sampleMime = "video/mp4";
+                else if (lower.endsWith(".mov")) sampleMime = "video/quicktime";
+                else if (lower.endsWith(".3gp")) sampleMime = "video/3gpp";
+                else if (lower.endsWith(".pdf")) sampleMime = "application/pdf";
+                else if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) sampleMime = "image/jpeg";
+                else if (lower.endsWith(".png")) sampleMime = "image/png";
+                else sampleMime = headerType === "VIDEO" ? "video/mp4" : headerType === "DOCUMENT" ? "application/pdf" : "image/png";
               }
             }
             if (!sampleBuffer) {
               const urlRes = await axios.get(normalizedUrl, { responseType: "arraybuffer", timeout: 15000 });
               sampleBuffer = Buffer.from(urlRes.data);
-              sampleMime = urlRes.headers["content-type"] || "image/png";
+              sampleMime = urlRes.headers["content-type"] || sampleMime;
               sampleName = "sample";
             }
           } catch (fetchErr) {
@@ -456,6 +468,10 @@ const createTemplate = async (
             sampleBuffer = DEFAULT_SAMPLE_PDF;
             sampleMime = "application/pdf";
             sampleName = "sample.pdf";
+          } else if (headerType === "VIDEO") {
+            sampleBuffer = DEFAULT_SAMPLE_MP4;
+            sampleMime = "video/mp4";
+            sampleName = "sample.mp4";
           } else {
             sampleBuffer = DEFAULT_SAMPLE_PNG;
             sampleMime = "image/png";
