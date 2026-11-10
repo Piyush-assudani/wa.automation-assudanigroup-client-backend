@@ -245,7 +245,8 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
     if (!isScheduled) {
       const io = req.app.get("io");
       const customMetaConfig = await getUserMetaConfig(req);
-      await processCampaign(
+      // Run campaign processing asynchronously in background so response returns instantly
+      processCampaign(
         messages,
         campaign.id,
         template_name.trim(),
@@ -255,7 +256,7 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
         media_type,
         media_url,
         customMetaConfig
-      );
+      ).catch((err) => console.error("❌ Background campaign processing error:", err.message));
     }
 
     // Keep history clean: automatically keep the last 100 campaigns
