@@ -2,6 +2,11 @@ const express = require("express");
 const router = express.Router();
 const db = require("../db");
 const { authenticate, requireMasterAdmin } = require("../middleware/authMiddleware");
+const { getIdempotentResponse, saveIdempotentResponse } = require("../services/idempotency");
+
+const isValidUuid = (val) =>
+  typeof val === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(val);
 
 // Safe Category Rates (INR / Message) with Platform Margin Buffer
 // Ensures client balance in system is conservative so Meta account always has surplus buffer
@@ -20,7 +25,8 @@ const getEffectiveUserId = (req) => {
 };
 
 /**
- * Check if user has sufficient funds and deduct for a message
+ * Atomically check if user has sufficient funds and deduct for a message
+ * using a PostgreSQL transaction and row-level FOR UPDATE lock.
  */
 async function checkAndDeductMessageFund(userId, options = {}) {
   const {
@@ -32,143 +38,133 @@ async function checkAndDeductMessageFund(userId, options = {}) {
     customDescription = null,
   } = options;
 
-  const cost = RATES[category] !== undefined ? RATES[category] : 0.85;
+  const cost = RATES[category] !== undefined ? RATES[category] : RATES.marketing;
+  const client = await db.getClient();
 
-  // Handle Meta 24-hour Free Tier (1,000 free service/customer care conversations / month per WABA)
-  if (cost === 0) {
-    const userRes = await db.query(
-      "SELECT id, username, wallet_balance, currency FROM public.users WHERE id = $1",
+  try {
+    await client.query("BEGIN");
+
+    const userRes = await client.query(
+      "SELECT id, username, wallet_balance, currency FROM public.users WHERE id = $1 FOR UPDATE",
       [userId]
     );
 
     if (userRes.rows.length === 0) {
+      await client.query("ROLLBACK");
       return { allowed: false, error: "User account not found." };
     }
 
-    const currentBalance = parseFloat(userRes.rows[0]?.wallet_balance || 0);
-    const description =
-      customDescription ||
-      `Service Reply to ${recipientName || recipientPhone || "Customer"} (Meta 24h Free Tier)`;
+    const user = userRes.rows[0];
+    const currentBalance = parseFloat(user.wallet_balance || 0);
 
-    // Record ₹0.00 ledger audit entry without deducting wallet balance
-    const txRes = await db.query(
+    // Handle ₹0.00 free tier safely inside the same transaction
+    if (cost === 0) {
+      const description =
+        customDescription ||
+        `Service Reply to ${recipientName || recipientPhone || "Customer"} (Meta 24h Free Tier)`;
+
+      const txRes = await client.query(
+        `INSERT INTO public.wallet_transactions 
+          (user_id, type, amount, balance_after, description, message_id, campaign_id, recipient_phone, recipient_name, category, status, created_at)
+         VALUES ($1, 'debit', 0.00, $2, $3, $4, $5, $6, $7, $8, 'completed', NOW())
+         RETURNING id`,
+        [userId, currentBalance, description, messageId, campaignId, recipientPhone, recipientName, category]
+      );
+      await client.query("COMMIT");
+      return {
+        allowed: true,
+        txId: txRes.rows[0]?.id,
+        cost: 0.00,
+        newBalance: currentBalance,
+        isFreeTier: true,
+      };
+    }
+
+    if (currentBalance < cost) {
+      await client.query("ROLLBACK");
+      return {
+        allowed: false,
+        balance: currentBalance,
+        required: cost,
+        error: `Insufficient message funds. Current balance is ₹${currentBalance.toFixed(2)}, but ₹${cost.toFixed(2)} is required per message. Please recharge wallet.`,
+      };
+    }
+
+    const newBalance = Math.round((currentBalance - cost) * 100) / 100;
+
+    await client.query(
+      "UPDATE public.users SET wallet_balance = $1 WHERE id = $2",
+      [newBalance, userId]
+    );
+
+    const description = customDescription || `${category.toUpperCase()} Message to ${recipientName || recipientPhone || "Customer"}`;
+
+    const txRes = await client.query(
       `INSERT INTO public.wallet_transactions 
         (user_id, type, amount, balance_after, description, message_id, campaign_id, recipient_phone, recipient_name, category, status, created_at)
-       VALUES ($1, 'debit', 0.00, $2, $3, $4, $5, $6, $7, $8, 'completed', NOW())
+       VALUES ($1, 'debit', $2, $3, $4, $5, $6, $7, $8, $9, 'completed', NOW())
        RETURNING id`,
-      [
-        userId,
-        currentBalance,
-        description,
-        messageId,
-        campaignId,
-        recipientPhone,
-        recipientName,
-        category,
-      ]
+      [userId, cost, newBalance, description, messageId, campaignId, recipientPhone, recipientName, category]
     );
+
+    await client.query("COMMIT");
 
     return {
       allowed: true,
       txId: txRes.rows[0]?.id,
-      cost: 0.00,
-      newBalance: currentBalance,
-      isFreeTier: true,
-    };
-  }
-
-  // Fetch current balance for paid message categories (Marketing ₹0.85, Utility ₹0.35, Auth ₹0.30)
-  const userRes = await db.query(
-    "SELECT id, username, wallet_balance, currency FROM public.users WHERE id = $1 FOR UPDATE",
-    [userId]
-  );
-
-  if (userRes.rows.length === 0) {
-    return { allowed: false, error: "User account not found." };
-  }
-
-  const user = userRes.rows[0];
-  const currentBalance = parseFloat(user.wallet_balance || 0);
-
-  if (currentBalance < cost) {
-    return {
-      allowed: false,
-      balance: currentBalance,
-      required: cost,
-      error: `Insufficient message funds. Current balance is ₹${currentBalance.toFixed(2)}, but ₹${cost.toFixed(2)} is required per message. Please recharge wallet.`,
-    };
-  }
-
-  const newBalance = Math.round((currentBalance - cost) * 100) / 100;
-
-  // Deduct from wallet
-  await db.query(
-    "UPDATE public.users SET wallet_balance = $1 WHERE id = $2",
-    [newBalance, userId]
-  );
-
-  // Record transaction
-  const description = customDescription || `${category.toUpperCase()} Message to ${recipientName || recipientPhone || "Customer"}`;
-
-  const txRes = await db.query(
-    `INSERT INTO public.wallet_transactions 
-      (user_id, type, amount, balance_after, description, message_id, campaign_id, recipient_phone, recipient_name, category, status, created_at)
-     VALUES ($1, 'debit', $2, $3, $4, $5, $6, $7, $8, $9, 'completed', NOW())
-     RETURNING id`,
-    [
-      userId,
       cost,
       newBalance,
-      description,
-      messageId,
-      campaignId,
-      recipientPhone,
-      recipientName,
-      category,
-    ]
-  );
-
-  return {
-    allowed: true,
-    txId: txRes.rows[0]?.id,
-    cost,
-    newBalance,
-    isFreeTier: false,
-  };
+      isFreeTier: false,
+    };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**
- * Refund a message transaction if delivery failed
+ * Atomically refund a message transaction if delivery failed.
+ * Uses FOR UPDATE on both the transaction and user rows to prevent double-refunds.
  */
 async function refundMessageFund(userId, txId, reason = "Message Delivery Failed") {
   if (!txId) return false;
 
+  const client = await db.getClient();
   try {
-    const txRes = await db.query(
-      "SELECT * FROM public.wallet_transactions WHERE id = $1 AND user_id = $2 AND type = 'debit' AND status = 'completed'",
+    await client.query("BEGIN");
+
+    const txRes = await client.query(
+      "SELECT * FROM public.wallet_transactions WHERE id = $1 AND user_id = $2 AND type = 'debit' AND status = 'completed' FOR UPDATE",
       [txId, userId]
     );
 
-    if (txRes.rows.length === 0) return false;
+    if (txRes.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return false;
+    }
+
     const tx = txRes.rows[0];
-    const refundAmount = parseFloat(tx.amount || 0);
+    const refundAmount = Math.round(parseFloat(tx.amount || 0) * 100) / 100;
 
     if (refundAmount <= 0) {
-      await db.query("UPDATE public.wallet_transactions SET status = 'refunded' WHERE id = $1", [txId]);
+      await client.query("UPDATE public.wallet_transactions SET status = 'refunded' WHERE id = $1", [txId]);
+      await client.query("COMMIT");
       return true;
     }
 
-    const userRes = await db.query(
+    const userRes = await client.query(
       "SELECT wallet_balance FROM public.users WHERE id = $1 FOR UPDATE",
       [userId]
     );
     const currentBalance = parseFloat(userRes.rows[0]?.wallet_balance || 0);
     const newBalance = Math.round((currentBalance + refundAmount) * 100) / 100;
 
-    await db.query("UPDATE public.users SET wallet_balance = $1 WHERE id = $2", [newBalance, userId]);
-    await db.query("UPDATE public.wallet_transactions SET status = 'refunded' WHERE id = $1", [txId]);
+    await client.query("UPDATE public.users SET wallet_balance = $1 WHERE id = $2", [newBalance, userId]);
+    await client.query("UPDATE public.wallet_transactions SET status = 'refunded' WHERE id = $1", [txId]);
 
-    await db.query(
+    await client.query(
       `INSERT INTO public.wallet_transactions 
         (user_id, type, amount, balance_after, description, message_id, campaign_id, recipient_phone, recipient_name, category, status, created_at)
        VALUES ($1, 'refund', $2, $3, $4, $5, $6, $7, $8, $9, 'completed', NOW())`,
@@ -185,10 +181,14 @@ async function refundMessageFund(userId, txId, reason = "Message Delivery Failed
       ]
     );
 
+    await client.query("COMMIT");
     return true;
   } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
     console.error("Refund error:", err);
     return false;
+  } finally {
+    client.release();
   }
 }
 
@@ -415,61 +415,93 @@ router.get("/admin/clients", authenticate, requireMasterAdmin, async (req, res) 
 /**
  * POST /api/billing/recharge
  * Master Admin can credit (add) or debit (deduct/reduce) funds from any client wallet
+ * Protected by PostgreSQL FOR UPDATE row-level lock and optional Idempotency-Key header.
  */
 router.post("/recharge", authenticate, requireMasterAdmin, async (req, res) => {
+  const idempotencyKey = req.headers["idempotency-key"];
+  if (idempotencyKey) {
+    const cached = await getIdempotentResponse(idempotencyKey, req.user?.id, "/api/billing/recharge");
+    if (cached) {
+      return res.status(cached.status).json(cached.body);
+    }
+  }
+
+  let clientConn;
   try {
     const { user_id, amount, description = "", action = "add" } = req.body || {};
 
-    if (!user_id) {
-      return res.status(400).json({ error: "Client user_id is required." });
+    if (!user_id || !isValidUuid(user_id)) {
+      return res.status(400).json({ error: "Valid client user_id (UUID) is required." });
     }
 
-    const adjustAmount = parseFloat(amount);
-    if (isNaN(adjustAmount) || adjustAmount <= 0) {
-      return res.status(400).json({ error: "Amount must be a positive number." });
+    const rawAmount = parseFloat(amount);
+    const adjustAmount = Math.round(rawAmount * 100) / 100;
+    if (!Number.isFinite(adjustAmount) || adjustAmount <= 0 || adjustAmount > 10000000) {
+      return res.status(400).json({ error: "Amount must be a positive number up to ₹1,00,00,000." });
     }
 
-    const userRes = await db.query(
+    clientConn = await db.getClient();
+    await clientConn.query("BEGIN");
+
+    const userRes = await clientConn.query(
       "SELECT id, username, wallet_balance FROM public.users WHERE id = $1 FOR UPDATE",
       [user_id]
     );
 
     if (userRes.rows.length === 0) {
+      await clientConn.query("ROLLBACK");
       return res.status(404).json({ error: "User account not found." });
     }
 
-    const client = userRes.rows[0];
-    const currentBalance = parseFloat(client.wallet_balance || 0);
+    const clientUser = userRes.rows[0];
+    const currentBalance = parseFloat(clientUser.wallet_balance || 0);
 
     let newBalance;
     let txType;
     let defaultDesc;
     const isDeduct = action === "deduct";
+    const safeDesc = typeof description === "string" ? description.trim().slice(0, 500) : "";
 
     if (isDeduct) {
       if (currentBalance < adjustAmount) {
+        await clientConn.query("ROLLBACK");
         return res.status(400).json({
           error: `Cannot deduct ₹${adjustAmount.toFixed(2)}. Client only has ₹${currentBalance.toFixed(2)} available.`,
         });
       }
       newBalance = Math.round((currentBalance - adjustAmount) * 100) / 100;
       txType = "debit";
-      defaultDesc = description.trim() || `Fund deduction by Admin (-₹${adjustAmount.toFixed(2)})`;
+      defaultDesc = safeDesc || `Fund deduction by Admin (-₹${adjustAmount.toFixed(2)})`;
     } else {
       newBalance = Math.round((currentBalance + adjustAmount) * 100) / 100;
       txType = "credit";
-      defaultDesc = description.trim() || `Wallet recharge by Admin (+₹${adjustAmount.toFixed(2)})`;
+      defaultDesc = safeDesc || `Wallet recharge by Admin (+₹${adjustAmount.toFixed(2)})`;
     }
 
-    await db.query("UPDATE public.users SET wallet_balance = $1 WHERE id = $2", [newBalance, user_id]);
+    await clientConn.query("UPDATE public.users SET wallet_balance = $1 WHERE id = $2", [newBalance, user_id]);
 
-    const txRes = await db.query(
+    const txRes = await clientConn.query(
       `INSERT INTO public.wallet_transactions 
         (user_id, type, amount, balance_after, description, category, status, created_at)
        VALUES ($1, $2, $3, $4, $5, 'service', 'completed', NOW())
        RETURNING id`,
       [user_id, txType, adjustAmount, newBalance, defaultDesc]
     );
+
+    await clientConn.query("COMMIT");
+
+    const responseBody = {
+      message: isDeduct
+        ? `Successfully deducted ₹${adjustAmount.toFixed(2)} from ${clientUser.username}! New balance is ₹${newBalance.toFixed(2)}.`
+        : `Successfully credited ₹${adjustAmount.toFixed(2)} to ${clientUser.username}! New balance is ₹${newBalance.toFixed(2)}.`,
+      user_id,
+      new_balance: newBalance,
+      action: isDeduct ? "deduct" : "add",
+    };
+
+    if (idempotencyKey) {
+      await saveIdempotentResponse(idempotencyKey, req.user?.id, "/api/billing/recharge", 200, responseBody);
+    }
 
     // Emit realtime Socket.io update
     const io = req.app.get("io");
@@ -483,17 +515,13 @@ router.post("/recharge", authenticate, requireMasterAdmin, async (req, res) => {
       });
     }
 
-    res.json({
-      message: isDeduct
-        ? `Successfully deducted ₹${adjustAmount.toFixed(2)} from ${client.username}! New balance is ₹${newBalance.toFixed(2)}.`
-        : `Successfully credited ₹${adjustAmount.toFixed(2)} to ${client.username}! New balance is ₹${newBalance.toFixed(2)}.`,
-      user_id,
-      new_balance: newBalance,
-      action: isDeduct ? "deduct" : "add",
-    });
+    res.json(responseBody);
   } catch (err) {
+    if (clientConn) await clientConn.query("ROLLBACK").catch(() => {});
     console.error("Recharge/adjustment error:", err);
     res.status(500).json({ error: "Failed to process wallet fund adjustment." });
+  } finally {
+    if (clientConn) clientConn.release();
   }
 });
 

@@ -3,14 +3,15 @@ const router = express.Router();
 const multer = require("multer");
 const db = require("../db");
 const { processCampaign } = require("../services/campaignProcessor");
-const { uploadFileToCloudinary } = require("../services/cloudinaryService");
 const { uploadFileToServer } = require("../services/localStorageService");
+const { RATES } = require("./billing");
+const { getIdempotentResponse, saveIdempotentResponse } = require("../services/idempotency");
 const os = require("os");
 const path = require("path");
 const xlsx = require("xlsx");
 const jwt = require("jsonwebtoken");
 const { uploadMediaToMeta, getTemplates, sendTemplateMessage } = require("../services/metaApi");
-const { getUserMetaConfig, authenticate } = require("../middleware/authMiddleware");
+const { getUserMetaConfig, authenticate, JWT_SECRET } = require("../middleware/authMiddleware");
 
 router.use(authenticate);
 
@@ -34,6 +35,14 @@ const uploadMedia = multer({
  */
 router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
   try {
+    const idempotencyKey = req.headers["idempotency-key"];
+    if (idempotencyKey) {
+      const cached = await getIdempotentResponse(idempotencyKey, req.user?.id, "/api/campaigns");
+      if (cached) {
+        return res.status(cached.status).json(cached.body);
+      }
+    }
+
     const { name, template_name, language_code, contact_list_ids } = req.body || {};
 
     if (!name || typeof name !== "string" || !name.trim()) {
@@ -188,11 +197,12 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
         [effectiveUserId]
       );
       const balance = parseFloat(userRes.rows[0]?.wallet_balance || 0);
-      const requiredCost = Math.round(membersResult.rows.length * 0.85 * 100) / 100;
+      const marketingRate = RATES.marketing || 1.08;
+      const requiredCost = Math.round(membersResult.rows.length * marketingRate * 100) / 100;
 
       if (balance < requiredCost) {
         return res.status(402).json({
-          error: `Insufficient wallet balance. This campaign has ${membersResult.rows.length} recipients requiring ₹${requiredCost.toFixed(2)} (at ₹0.85/marketing message), but your available balance is ₹${balance.toFixed(2)}. Please recharge your wallet before launching.`,
+          error: `Insufficient wallet balance. This campaign has ${membersResult.rows.length} recipients requiring ₹${requiredCost.toFixed(2)} (at ₹${marketingRate.toFixed(2)}/marketing message), but your available balance is ₹${balance.toFixed(2)}. Please recharge your wallet before launching.`,
           required: requiredCost,
           balance,
         });
@@ -269,7 +279,7 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
        )`
     ).catch(() => {});
 
-    res.status(201).json({
+    const responseBody = {
       message: isScheduled
         ? `Campaign successfully scheduled for ${new Date(scheduled_at).toLocaleString()}`
         : "Campaign launched and queued for delivery",
@@ -282,7 +292,13 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
         status: campaign.status,
         created_at: campaign.created_at,
       },
-    });
+    };
+
+    if (idempotencyKey) {
+      await saveIdempotentResponse(idempotencyKey, req.user?.id, "/api/campaigns", 201, responseBody);
+    }
+
+    res.status(201).json(responseBody);
   } catch (err) {
     console.error("❌ Campaign creation error:", err);
     res.status(500).json({ error: "Failed to create and dispatch campaign." });
@@ -639,7 +655,6 @@ router.get("/:id/export", async (req, res) => {
     let user = null;
     if (token) {
       try {
-        const JWT_SECRET = process.env.JWT_SECRET || "enterprise_wp_automation_jwt_secret_2026";
         user = jwt.verify(token, JWT_SECRET);
       } catch (e) {}
     }

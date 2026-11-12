@@ -3,8 +3,7 @@ const router = express.Router();
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const db = require("../db");
-
-const JWT_SECRET = process.env.JWT_SECRET || "enterprise_wp_automation_jwt_secret_2026";
+const { JWT_SECRET } = require("../middleware/authMiddleware");
 
 /**
  * POST /api/auth/login

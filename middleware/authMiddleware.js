@@ -2,6 +2,14 @@ const jwt = require("jsonwebtoken");
 
 const JWT_SECRET = process.env.JWT_SECRET || "enterprise_wp_automation_jwt_secret_2026";
 
+const isValidUuid = (val) =>
+  typeof val === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(val);
+
+// Lightweight TTL cache for RBAC role permissions (minimizes DB reads under load)
+const rolePermsCache = new Map();
+const ROLE_PERMS_TTL = 60 * 1000;
+
 const authenticate = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -14,13 +22,13 @@ const authenticate = (req, res, next) => {
     const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
 
-    // SaaS Multi-tenant client switching strictly for Master Admin ONLY (piyushassudani)
+    // SaaS Multi-tenant client switching strictly for Master Admin ONLY
     const isMaster = req.user.role === "master_admin" || (req.user.username && req.user.username.toLowerCase() === "piyushassudani");
     const targetClientId = req.headers["x-client-id"];
 
-    if (targetClientId && isMaster) {
+    if (targetClientId && isMaster && isValidUuid(targetClientId)) {
       req.targetUserId = targetClientId;
-    } else if (req.user.parent_client_id) {
+    } else if (req.user.parent_client_id && isValidUuid(req.user.parent_client_id)) {
       // Sub-user/team member operates strictly within their parent client's workspace
       req.targetUserId = req.user.parent_client_id;
     } else {
@@ -30,6 +38,51 @@ const authenticate = (req, res, next) => {
     next();
   } catch (err) {
     return res.status(401).json({ error: "Unauthorized: Invalid token" });
+  }
+};
+
+/**
+ * RBAC Permission Middleware: verifies that the authenticated user's role
+ * holds the required permission in roles/permissions/role_permissions.
+ */
+const requirePermission = (permissionName) => async (req, res, next) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthorized: Authentication required." });
+    }
+    const roleName = (req.user.role || "client").toLowerCase();
+    if (roleName === "master_admin" || roleName === "owner" || req.user.username?.toLowerCase() === "piyushassudani") {
+      return next();
+    }
+
+    const now = Date.now();
+    let permsSet = null;
+    const cached = rolePermsCache.get(roleName);
+    if (cached && now - cached.time < ROLE_PERMS_TTL) {
+      permsSet = cached.perms;
+    } else {
+      const db = require("../db");
+      const result = await db.query(
+        `SELECT p.name
+         FROM public.role_permissions rp
+         JOIN public.roles r ON rp.role_id = r.id
+         JOIN public.permissions p ON rp.permission_id = p.id
+         WHERE LOWER(r.name) = $1`,
+        [roleName]
+      );
+      permsSet = new Set(result.rows.map((row) => row.name));
+      rolePermsCache.set(roleName, { perms: permsSet, time: now });
+    }
+
+    if (!permsSet.has(permissionName)) {
+      return res.status(403).json({
+        error: `Access denied. Missing required permission: ${permissionName}`,
+      });
+    }
+    next();
+  } catch (err) {
+    // Fail-closed if permission check errors unexpectedly
+    return res.status(403).json({ error: "Access denied. Unable to verify permissions." });
   }
 };
 
@@ -98,5 +151,7 @@ module.exports = authenticate;
 module.exports.authenticate = authenticate;
 module.exports.requireMasterAdmin = requireMasterAdmin;
 module.exports.requireAdmin = requireAdmin;
+module.exports.requirePermission = requirePermission;
 module.exports.getUserMetaConfig = getUserMetaConfig;
+module.exports.JWT_SECRET = JWT_SECRET;
 

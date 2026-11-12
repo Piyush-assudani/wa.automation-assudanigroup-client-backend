@@ -3,6 +3,9 @@ require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
 const axios = require("axios");
 const fs = require("fs");
 const FormData = require("form-data");
+const { withRetry, CircuitBreaker } = require("./resilience");
+
+const metaBreaker = new CircuitBreaker({ failureThreshold: 8, cooldownMs: 30000 });
 
 /**
  * Returns dynamic Meta configuration from environment variables or custom user config
@@ -46,13 +49,26 @@ const sendTemplateMessage = async (to, templateName, languageCode = "en_US", com
       payload.template.components = components;
     }
 
-    const response = await axios.post(`${apiBase}/${phoneId}/messages`, payload, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      timeout: 15000,
-    });
+    if (!metaBreaker.canExecute()) {
+      return {
+        success: false,
+        error: "Meta Cloud API circuit breaker is temporarily open due to upstream instability. Retrying shortly.",
+      };
+    }
+
+    const response = await withRetry(
+      () =>
+        axios.post(`${apiBase}/${phoneId}/messages`, payload, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          timeout: 15000,
+        }),
+      { retries: 2, baseDelayMs: 500 }
+    );
+
+    metaBreaker.recordSuccess();
 
     return {
       success: true,
@@ -60,6 +76,7 @@ const sendTemplateMessage = async (to, templateName, languageCode = "en_US", com
       data: response.data,
     };
   } catch (err) {
+    metaBreaker.recordFailure(err);
     console.error(`❌ Meta API sendTemplate error for ${to}:`, err.response?.data || err.message);
     const metaErr = err.response?.data?.error;
     let detailedError = metaErr?.error_data?.details
@@ -96,13 +113,26 @@ const sendTextMessage = async (to, text, customConfig = null) => {
       text: { body: text },
     };
 
-    const response = await axios.post(`${apiBase}/${phoneId}/messages`, payload, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      timeout: 15000,
-    });
+    if (!metaBreaker.canExecute()) {
+      return {
+        success: false,
+        error: "Meta Cloud API circuit breaker is temporarily open due to upstream instability. Retrying shortly.",
+      };
+    }
+
+    const response = await withRetry(
+      () =>
+        axios.post(`${apiBase}/${phoneId}/messages`, payload, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          timeout: 15000,
+        }),
+      { retries: 2, baseDelayMs: 500 }
+    );
+
+    metaBreaker.recordSuccess();
 
     return {
       success: true,
@@ -110,6 +140,7 @@ const sendTextMessage = async (to, text, customConfig = null) => {
       data: response.data,
     };
   } catch (err) {
+    metaBreaker.recordFailure(err);
     console.error("❌ Meta API sendText error:", err.response?.data || err.message);
     return {
       success: false,

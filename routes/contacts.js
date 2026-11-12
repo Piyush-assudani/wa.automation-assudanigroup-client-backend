@@ -3,6 +3,8 @@ const router = express.Router();
 const db = require("../db");
 const { authenticate, requireMasterAdmin } = require("../middleware/authMiddleware");
 
+router.use(authenticate);
+
 const isValidUuid = (val) =>
   typeof val === "string" &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(val);
@@ -244,10 +246,18 @@ router.put("/:id", async (req, res) => {
     const safeName = (typeof name === "string" ? name.trim().slice(0, 255) : "") || "Unknown";
     const safeCity = typeof city === "string" ? city.trim().slice(0, 255) : "";
 
-    const result = await db.query(
-      "UPDATE contacts SET name = $1, phone_number = $2, city = $3 WHERE id = $4 RETURNING *",
-      [safeName, cleanedPhone, safeCity, id]
-    );
+    const isMaster = req.user?.role === "master_admin" || (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
+    const effectiveUserId = (isMaster && !req.headers["x-client-id"]) ? null : (req.targetUserId || req.user?.id);
+
+    const result = effectiveUserId
+      ? await db.query(
+          "UPDATE contacts SET name = $1, phone_number = $2, city = $3 WHERE id = $4 AND (user_id = $5 OR user_id IS NULL) RETURNING *",
+          [safeName, cleanedPhone, safeCity, id, effectiveUserId]
+        )
+      : await db.query(
+          "UPDATE contacts SET name = $1, phone_number = $2, city = $3 WHERE id = $4 RETURNING *",
+          [safeName, cleanedPhone, safeCity, id]
+        );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Contact not found" });
@@ -272,13 +282,20 @@ router.delete("/:id", async (req, res) => {
       return res.status(400).json({ error: "Invalid contact ID format." });
     }
 
+    const isMaster = req.user?.role === "master_admin" || (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
+    const effectiveUserId = (isMaster && !req.headers["x-client-id"]) ? null : (req.targetUserId || req.user?.id);
+
+    const existing = effectiveUserId
+      ? await db.query("SELECT id FROM contacts WHERE id = $1 AND user_id = $2", [id, effectiveUserId])
+      : await db.query("SELECT id FROM contacts WHERE id = $1", [id]);
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Contact not found or access denied" });
+    }
+
     await db.query("DELETE FROM contact_list_members WHERE contact_id = $1", [id]);
     await db.query("DELETE FROM messages WHERE contact_id = $1", [id]);
-    const result = await db.query("DELETE FROM contacts WHERE id = $1 RETURNING *", [id]);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Contact not found" });
-    }
+    await db.query("DELETE FROM contacts WHERE id = $1", [id]);
 
     res.json({ message: "Contact deleted successfully" });
   } catch (err) {

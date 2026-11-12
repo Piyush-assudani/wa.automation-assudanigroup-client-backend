@@ -10,6 +10,7 @@ const rateLimit = require("express-rate-limit");
 dotenv.config();
 
 const app = express();
+app.set("trust proxy", 1); // Required behind Cloudflare / Nginx reverse proxies for accurate IP rate limiting
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5001;
 
@@ -74,8 +75,40 @@ const ipViolationMap = new Map();
 const IP_JAIL_TIME_MS = 15 * 60 * 1000; // 15 mins jail
 const MAX_VIOLATIONS = 60;
 
+const getClientIp = (req) =>
+  req.headers["cf-connecting-ip"] ||
+  (typeof req.headers["x-forwarded-for"] === "string" ? req.headers["x-forwarded-for"].split(",")[0].trim() : null) ||
+  req.ip ||
+  req.socket?.remoteAddress ||
+  "unknown";
+
+const recordIpViolation = (ip) => {
+  if (!ip || ip === "unknown") return;
+  const now = Date.now();
+  const existing = ipViolationMap.get(ip) || { count: 0, lastSeen: now, jailedUntil: 0 };
+  if (now - existing.lastSeen > IP_JAIL_TIME_MS) {
+    existing.count = 0;
+  }
+  existing.count += 1;
+  existing.lastSeen = now;
+  if (existing.count >= MAX_VIOLATIONS) {
+    existing.jailedUntil = now + IP_JAIL_TIME_MS;
+  }
+  ipViolationMap.set(ip, existing);
+};
+
+// Prune expired IP records every 15 mins so memory stays bounded under DDoS
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, rec] of ipViolationMap.entries()) {
+    if (now - rec.lastSeen > IP_JAIL_TIME_MS && (!rec.jailedUntil || now > rec.jailedUntil)) {
+      ipViolationMap.delete(ip);
+    }
+  }
+}, IP_JAIL_TIME_MS).unref();
+
 app.use((req, res, next) => {
-  const ip = req.ip || req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown";
+  const ip = getClientIp(req);
   const record = ipViolationMap.get(ip);
   const now = Date.now();
 
@@ -98,7 +131,10 @@ const apiLimiter = rateLimit({
   max: 2000,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "Too many requests. Please slow down." },
+  handler: (req, res) => {
+    recordIpViolation(getClientIp(req));
+    res.status(429).json({ error: "Too many requests. Please slow down." });
+  },
 });
 
 // Strict Auth rate limiter: 30 attempts per 15 minutes to prevent brute-forcing
@@ -107,7 +143,10 @@ const authLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "Too many login attempts from this IP. Please try again after 15 minutes." },
+  handler: (req, res) => {
+    recordIpViolation(getClientIp(req));
+    res.status(429).json({ error: "Too many login attempts from this IP. Please try again after 15 minutes." });
+  },
 });
 
 // ============================================
@@ -140,11 +179,14 @@ const dashboardRoutes = require("./routes/dashboard");
 const privacyRoutes = require("./routes/privacy");
 const usersRoutes = require("./routes/users");
 const billingRoutes = require("./routes/billing");
+const backupRoutes = require("./routes/backup");
 
-app.use("/api", apiLimiter, apiRoutes);
+app.use("/api", apiLimiter);
+app.use("/api", apiRoutes);
 app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/users", usersRoutes);
 app.use("/api/billing", billingRoutes);
+app.use("/api/backup", backupRoutes);
 app.use("/api/contact_lists", contactListsRoutes);
 app.use("/api/contacts", contactRoutes);
 app.use("/api/messages", messageRoutes);
@@ -189,12 +231,34 @@ app.use((req, res) => {
   res.status(404).json({ error: "Route not found" });
 });
 
-// 500 Central Error Handler
+// 500 Central Error Handler + Multer & Error Tracker
 app.use((err, req, res, next) => {
-  console.error("Central Error Caught:", err.message || err);
-  res.status(err.status || 500).json({
-    error: "Internal Server Error",
-    message: process.env.NODE_ENV === "development" ? err.message : undefined,
+  if (err && err.name === "MulterError") {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({ error: "Uploaded file exceeds the maximum allowed size limit." });
+    }
+    return res.status(400).json({ error: `File upload error: ${err.message}` });
+  }
+
+  const statusCode = err.status || 500;
+  const errMsg = err.message || "Internal Server Error";
+  console.error("Central Error Caught:", errMsg);
+
+  // Persist server error asynchronously without blocking response
+  if (statusCode >= 500) {
+    const dbRef = require("./db");
+    dbRef
+      .query(
+        `INSERT INTO public.system_error_logs (method, path, status_code, error_message, user_id, ip_address)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [req.method, req.originalUrl?.slice(0, 500), statusCode, String(errMsg).slice(0, 1000), req.user?.id || null, getClientIp(req)]
+      )
+      .catch(() => {});
+  }
+
+  res.status(statusCode).json({
+    error: statusCode >= 500 ? "Internal Server Error" : errMsg,
+    message: process.env.NODE_ENV === "development" ? errMsg : undefined,
   });
 });
 
@@ -203,28 +267,20 @@ app.use((err, req, res, next) => {
 // ============================================
 const { initBullMQ } = require("./services/campaignProcessor");
 const { startCampaignScheduler } = require("./services/campaignScheduler");
+const { runRbacAndIndexMigration } = require("./db/migrate_rbac_and_indexes");
 const db = require("./db");
 initBullMQ(io);
 startCampaignScheduler(io);
 
-// Auto-migrate any legacy media URLs and ensure TEXT capacity
-const configuredBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
-const migrationQuery = configuredBaseUrl
-  ? `
-    ALTER TABLE messages ALTER COLUMN media_url TYPE TEXT;
-    ALTER TABLE campaigns ALTER COLUMN media_url TYPE TEXT;
-    UPDATE media_assets SET media_url = REPLACE(media_url, 'https://morihix-wp.piyushassudani.in', '${configuredBaseUrl}') WHERE media_url LIKE '%morihix-wp.piyushassudani.in%';
-    UPDATE campaigns SET media_url = REPLACE(media_url, 'https://morihix-wp.piyushassudani.in', '${configuredBaseUrl}') WHERE media_url LIKE '%morihix-wp.piyushassudani.in%';
-    UPDATE messages SET media_url = REPLACE(media_url, 'https://morihix-wp.piyushassudani.in', '${configuredBaseUrl}') WHERE media_url LIKE '%morihix-wp.piyushassudani.in%';
-  `
-  : `
-    ALTER TABLE messages ALTER COLUMN media_url TYPE TEXT;
-    ALTER TABLE campaigns ALTER COLUMN media_url TYPE TEXT;
-  `;
-
-db.query(migrationQuery).catch((err) => {
-  console.warn("⚠️ Media URL legacy migration notice:", err.message);
-});
+// Ensure TEXT capacity & RBAC/Index schema on startup
+db.query(`
+  ALTER TABLE messages ALTER COLUMN media_url TYPE TEXT;
+  ALTER TABLE campaigns ALTER COLUMN media_url TYPE TEXT;
+`)
+  .then(() => runRbacAndIndexMigration())
+  .catch((err) => {
+    console.warn("⚠️ Startup schema migration notice:", err.message);
+  });
 
 // Server Listen
 server.listen(PORT, () => {
@@ -233,6 +289,18 @@ server.listen(PORT, () => {
   console.log(`🔌 WebSocket server ready`);
   console.log(`📡 Webhook endpoint: http://localhost:${PORT}/webhook`);
 });
+
+const gracefulShutdown = (signal) => {
+  console.log(`🛑 ${signal} received. Closing HTTP server & DB pool gracefully...`);
+  server.close(() => {
+    io.close();
+    db.pool.end().catch(() => {}).finally(() => process.exit(0));
+  });
+  setTimeout(() => process.exit(1), 10000).unref();
+};
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 process.on("uncaughtException", (err) => {
   console.error("🔥 Uncaught Exception caught safely:", err.message || err);

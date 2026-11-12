@@ -5,8 +5,10 @@ const multer = require("multer");
 const db = require("../db");
 const { uploadFileToServer, deleteFileFromServer } = require("../services/localStorageService");
 const { uploadMediaToMeta } = require("../services/metaApi");
-const { getUserMetaConfig } = require("../middleware/authMiddleware");
+const { getUserMetaConfig, authenticate } = require("../middleware/authMiddleware");
 const os = require("os");
+
+router.use(authenticate);
 
 const isValidUuid = (val) =>
   typeof val === "string" &&
@@ -22,12 +24,16 @@ const upload = multer({
   limits: { fileSize: 64 * 1024 * 1024 }, // 64MB limit for server storage and video uploads
 });
 
-// GET /api/media - list all media assets
+// GET /api/media - list media assets (tenant-scoped for non-master admins)
 router.get("/", async (req, res) => {
   try {
-    const result = await db.query(
-      `SELECT * FROM media_assets ORDER BY created_at DESC`
-    );
+    const isMaster = req.user && req.user.role === "master_admin";
+    const result = isMaster
+      ? await db.query(`SELECT * FROM media_assets ORDER BY created_at DESC`)
+      : await db.query(
+          `SELECT * FROM media_assets WHERE user_id = $1 OR user_id IS NULL ORDER BY created_at DESC`,
+          [req.targetUserId]
+        );
     const publicBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
     const rows = result.rows.map(row => ({
       ...row,
@@ -67,11 +73,11 @@ router.post("/", upload.single("file"), async (req, res) => {
     // 3. Clean up temp multer file
     fs.promises.unlink(req.file.path).catch(() => {});
 
-    // 4. Save to database
+    // 4. Save to database (with tenant user_id)
     const result = await db.query(
-      `INSERT INTO media_assets (original_name, media_url, meta_media_id, resource_type)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [req.file.originalname, mediaUrl, metaMediaId, resourceType]
+      `INSERT INTO media_assets (user_id, original_name, media_url, meta_media_id, resource_type)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [req.targetUserId || null, req.file.originalname, mediaUrl, metaMediaId, resourceType]
     );
 
     res.status(201).json(result.rows[0]);
@@ -90,9 +96,12 @@ router.delete("/:id", async (req, res) => {
       return res.status(400).json({ error: "Invalid media ID format." });
     }
 
-    const existing = await db.query(`SELECT media_url FROM media_assets WHERE id = $1`, [id]);
+    const isMaster = req.user && req.user.role === "master_admin";
+    const existing = isMaster
+      ? await db.query(`SELECT media_url FROM media_assets WHERE id = $1`, [id])
+      : await db.query(`SELECT media_url FROM media_assets WHERE id = $1 AND user_id = $2`, [id, req.targetUserId]);
     if (existing.rows.length === 0) {
-      return res.status(404).json({ error: "Media asset not found." });
+      return res.status(404).json({ error: "Media asset not found or unauthorized." });
     }
 
     await deleteFileFromServer(existing.rows[0].media_url);
