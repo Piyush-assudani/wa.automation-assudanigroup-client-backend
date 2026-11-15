@@ -391,16 +391,28 @@ router.get("/", async (req, res) => {
       `SELECT
         c.*,
         u.username as client_username,
-        COUNT(m.id) as total_messages,
-        COUNT(CASE WHEN m.status = 'delivered' THEN 1 END) as total_delivered,
-        COUNT(CASE WHEN m.status = 'read' THEN 1 END) as total_read,
-        COUNT(CASE WHEN m.status = 'failed' THEN 1 END) as total_failed,
-        COALESCE((SELECT COUNT(*) FROM contact_list_members clm WHERE clm.list_id = c.contact_list_id), 0) as total_recipients
+        COALESCE(ms.total_messages, 0) as total_messages,
+        COALESCE(ms.total_delivered, 0) as total_delivered,
+        COALESCE(ms.total_read, 0) as total_read,
+        COALESCE(ms.total_failed, 0) as total_failed,
+        COALESCE(clm.total_recipients, 0) as total_recipients
       FROM public.campaigns c
       LEFT JOIN public.users u ON c.user_id = u.id
-      LEFT JOIN public.messages m ON m.campaign_id = c.id
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(*) as total_messages,
+          COUNT(CASE WHEN status = 'delivered' THEN 1 END) as total_delivered,
+          COUNT(CASE WHEN status = 'read' THEN 1 END) as total_read,
+          COUNT(CASE WHEN status = 'failed' THEN 1 END) as total_failed
+        FROM public.messages m
+        WHERE m.campaign_id = c.id
+      ) ms ON true
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) as total_recipients
+        FROM public.contact_list_members clm_sub
+        WHERE clm_sub.list_id = c.contact_list_id
+      ) clm ON true
       ${whereClause}
-      GROUP BY c.id, u.username
       ORDER BY c.created_at DESC`,
       params
     );
