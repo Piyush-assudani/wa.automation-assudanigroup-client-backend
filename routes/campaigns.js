@@ -394,7 +394,8 @@ router.get("/", async (req, res) => {
         COUNT(m.id) as total_messages,
         COUNT(CASE WHEN m.status = 'delivered' THEN 1 END) as total_delivered,
         COUNT(CASE WHEN m.status = 'read' THEN 1 END) as total_read,
-        COUNT(CASE WHEN m.status = 'failed' THEN 1 END) as total_failed
+        COUNT(CASE WHEN m.status = 'failed' THEN 1 END) as total_failed,
+        COALESCE((SELECT COUNT(*) FROM contact_list_members clm WHERE clm.list_id = c.contact_list_id), 0) as total_recipients
       FROM public.campaigns c
       LEFT JOIN public.users u ON c.user_id = u.id
       LEFT JOIN public.messages m ON m.campaign_id = c.id
@@ -467,10 +468,23 @@ router.get("/:id", async (req, res) => {
       camp.media_url = camp.media_url.replace(/http:\/\/localhost:\d+/g, publicBaseUrl);
     }
 
+    let totalInList = 0;
+    if (camp && camp.contact_list_id) {
+      const listCountRes = await db.query(
+        `SELECT COUNT(*) FROM contact_list_members WHERE list_id = $1`,
+        [camp.contact_list_id]
+      ).catch(() => ({ rows: [{ count: 0 }] }));
+      totalInList = parseInt(listCountRes.rows[0]?.count || 0, 10);
+    }
+    const totalProcessed = statsResult.rows.reduce((sum, r) => sum + parseInt(r.count || 0, 10), 0);
+    const unsentCount = Math.max(0, totalInList - totalProcessed);
+
     res.json({
       ...camp,
       stats: statsResult.rows,
       sender_breakdown: senderBreakdown.rows,
+      total_in_list: totalInList,
+      unsent_count: unsentCount,
     });
   } catch (err) {
     console.error("❌ Campaign detail error:", err);
@@ -825,6 +839,129 @@ router.post("/:id/retry", async (req, res) => {
   } catch (err) {
     console.error("❌ Retry campaign error:", err);
     res.status(500).json({ error: "Failed to retry campaign messages." });
+  }
+});
+
+/**
+ * POST /api/campaigns/:id/resume
+ * Resumes dispatching to remaining unsent contacts in the campaign's contact list
+ */
+router.post("/:id/resume", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!isValidUuid(id)) {
+      return res.status(400).json({ error: "Invalid campaign ID format." });
+    }
+
+    const campResult = await db.query(`SELECT * FROM campaigns WHERE id = $1`, [id]);
+    if (campResult.rows.length === 0) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+    const campaign = campResult.rows[0];
+
+    if (!campaign.contact_list_id) {
+      return res.status(400).json({ error: "Campaign does not have an associated contact list to resume." });
+    }
+
+    // Find unsent contacts
+    const unsentResult = await db.query(
+      `SELECT c.id, c.phone_number, c.name, c.city
+       FROM contact_list_members clm
+       JOIN contacts c ON clm.contact_id = c.id
+       WHERE clm.list_id = $1
+         AND c.id NOT IN (
+           SELECT contact_id FROM messages WHERE campaign_id = $2
+         )`,
+      [campaign.contact_list_id, id]
+    );
+
+    const unsent = unsentResult.rows;
+    if (unsent.length === 0) {
+      return res.json({
+        success: true,
+        message: "All recipients in this list have already been sent to.",
+        resumed_count: 0,
+      });
+    }
+
+    const effectiveUserId = campaign.user_id || req.targetUserId || req.user?.id;
+
+    // Check wallet balance
+    if (effectiveUserId) {
+      const userRes = await db.query("SELECT wallet_balance FROM public.users WHERE id = $1", [effectiveUserId]);
+      const balance = parseFloat(userRes.rows[0]?.wallet_balance || 0);
+      const marketingRate = RATES.marketing || 1.08;
+      const requiredCost = Math.round(unsent.length * marketingRate * 100) / 100;
+
+      if (balance < requiredCost) {
+        return res.status(402).json({
+          error: `Insufficient wallet balance. Resuming requires ₹${requiredCost.toFixed(2)} for ${unsent.length} remaining recipients, but available balance is ₹${balance.toFixed(2)}.`,
+          required: requiredCost,
+          balance,
+        });
+      }
+    }
+
+    // Resolve Sender Channel
+    let senderConfig = null;
+    let senderPhoneId = campaign.sender_phone_number_id || null;
+    let senderPhone = campaign.sender_phone_number || null;
+
+    if (campaign.sender_channel_id) {
+      const chanRes = await db.query(
+        `SELECT id, phone_number_id, access_token, waba_id, display_phone_number, verified_name
+         FROM public.user_whatsapp_channels WHERE id = $1`,
+        [campaign.sender_channel_id]
+      );
+      if (chanRes.rows.length > 0) {
+        const chan = chanRes.rows[0];
+        senderPhoneId = chan.phone_number_id;
+        senderPhone = chan.display_phone_number || chan.phone_number_id;
+        senderConfig = {
+          channelId: chan.id,
+          phoneId: chan.phone_number_id.trim(),
+          token: chan.access_token.trim(),
+          wabaId: chan.waba_id ? chan.waba_id.trim() : null,
+          displayPhone: chan.display_phone_number,
+          verifiedName: chan.verified_name,
+        };
+      }
+    }
+
+    if (!senderConfig) {
+      senderConfig = await getUserMetaConfig(req, campaign.sender_channel_id);
+    }
+
+    const messages = unsent.map((member) => ({
+      to: member.phone_number ? String(member.phone_number).replace(/\D/g, "") : "",
+      contactId: member.id,
+      bodyParams: [],
+    }));
+
+    const io = req.app.get("io");
+    processCampaign(
+      messages,
+      campaign.id,
+      campaign.template_name,
+      campaign.language_code || "hi",
+      io,
+      campaign.media_id,
+      campaign.media_type,
+      campaign.media_url,
+      senderConfig,
+      senderPhoneId,
+      senderPhone
+    ).catch((err) => console.error("❌ Background resume campaign processing error:", err.message));
+
+    return res.json({
+      success: true,
+      message: `Resumed campaign "${campaign.name}" for ${unsent.length} remaining recipients.`,
+      resumed_count: unsent.length,
+    });
+  } catch (err) {
+    console.error("❌ Resume campaign error:", err);
+    res.status(500).json({ error: "Failed to resume campaign." });
   }
 });
 
