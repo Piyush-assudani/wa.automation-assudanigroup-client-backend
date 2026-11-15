@@ -46,7 +46,7 @@ const initBullMQ = (io) => {
     campaignWorker = new Worker(
       "campaign-messages",
       async (job) => {
-        const { to, templateName, languageCode, campaignId, contactId, mediaId, mediaType, mediaUrl } = job.data;
+        const { to, templateName, languageCode, campaignId, contactId, mediaId, mediaType, mediaUrl, senderPhoneId, senderPhone } = job.data;
 
         let components = [];
         if (mediaType && (mediaId || mediaUrl)) {
@@ -72,8 +72,8 @@ const initBullMQ = (io) => {
         const result = await sendTemplateMessage(to, templateName, languageCode, components, job.data.customMetaConfig || null);
 
         const msgRes = await db.query(
-          `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp)
-           VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, NOW())
+          `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp, sender_phone_number_id, sender_phone_number)
+           VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, NOW(), $8, $9)
            RETURNING *`,
           [
             campaignId,
@@ -83,6 +83,8 @@ const initBullMQ = (io) => {
             result.messageId || null,
             result.success ? "sent" : "failed",
             result.success ? null : (result.error || "Failed to send template message via Meta API"),
+            senderPhoneId || null,
+            senderPhone || null,
           ]
         );
         const savedMsg = msgRes.rows[0];
@@ -108,6 +110,8 @@ const initBullMQ = (io) => {
           io.emit("campaign_progress", {
             campaignId,
             phone: to,
+            sender_phone: senderPhone || null,
+            sender_phone_id: senderPhoneId || null,
             success: result.success,
             error: result.error || null,
           });
@@ -116,6 +120,8 @@ const initBullMQ = (io) => {
             id: savedMsg?.id,
             contact_id: contactId,
             contact_phone: to,
+            sender_phone_number: senderPhone || null,
+            sender_phone_number_id: senderPhoneId || null,
             contact_name: null,
             contact_user_id: campaignOwnerId,
             direction: "outbound",
@@ -155,7 +161,19 @@ const initBullMQ = (io) => {
 
 
 
-const processInMemory = async (messages, campaignId, templateName, languageCode, io, mediaId = null, mediaType = null, mediaUrl = null, customMetaConfig = null) => {
+const processInMemory = async (
+  messages,
+  campaignId,
+  templateName,
+  languageCode,
+  io,
+  mediaId = null,
+  mediaType = null,
+  mediaUrl = null,
+  customMetaConfig = null,
+  senderPhoneId = null,
+  senderPhone = null
+) => {
   const DELAY_MS = 2000; 
 
   const campRes = await db.query("SELECT user_id, name FROM campaigns WHERE id = $1", [campaignId]);
@@ -266,8 +284,8 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
       }
 
       const msgRes = await db.query(
-        `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp)
-         VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, NOW())
+        `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp, sender_phone_number_id, sender_phone_number)
+         VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, NOW(), $8, $9)
          RETURNING *`,
         [
           campaignId,
@@ -277,6 +295,8 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
           result.messageId || null,
           result.success ? "sent" : "failed",
           result.success ? null : (result.error || "Failed to send template message via Meta API"),
+          senderPhoneId || null,
+          senderPhone || null,
         ]
       );
       const savedMsg = msgRes.rows[0];
@@ -304,6 +324,8 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
         io.emit("campaign_progress", {
           campaignId,
           phone: to,
+          sender_phone: senderPhone || null,
+          sender_phone_id: senderPhoneId || null,
           success: result.success,
           error: result.error || null,
         });
@@ -312,6 +334,8 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
           id: savedMsg?.id,
           contact_id: contactId,
           contact_phone: to,
+          sender_phone_number: senderPhone || null,
+          sender_phone_number_id: senderPhoneId || null,
           contact_name: null,
           contact_user_id: campaignOwnerId,
           direction: "outbound",
@@ -325,14 +349,16 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
     } catch (error) {
       console.error(`Error sending message to ${to}:`, error);
       await db.query(
-        `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp)
-         VALUES ($1, $2, 'outbound', $3, $4, NULL, 'failed', $5, NOW())`,
+        `INSERT INTO messages (campaign_id, contact_id, direction, message_body, media_url, meta_message_id, status, error_message, timestamp, sender_phone_number_id, sender_phone_number)
+         VALUES ($1, $2, 'outbound', $3, $4, NULL, 'failed', $5, NOW(), $6, $7)`,
         [
           campaignId,
           contactId,
           `[Template: ${templateName}]`,
           mediaUrl || null,
           error.message || "Unexpected error while sending template message",
+          senderPhoneId || null,
+          senderPhone || null,
         ]
       ).catch(() => {});
     }
@@ -356,7 +382,19 @@ const processInMemory = async (messages, campaignId, templateName, languageCode,
 
 
 
-const processCampaign = async (messages, campaignId, templateName, languageCode, io, mediaId = null, mediaType = null, mediaUrl = null, customMetaConfig = null) => {
+const processCampaign = async (
+  messages,
+  campaignId,
+  templateName,
+  languageCode,
+  io,
+  mediaId = null,
+  mediaType = null,
+  mediaUrl = null,
+  customMetaConfig = null,
+  senderPhoneId = null,
+  senderPhone = null
+) => {
   if (bullmqAvailable && campaignQueue) {
     console.log(`📨 Enqueueing ${messages.length} messages via BullMQ`);
     for (const msg of messages) {
@@ -371,11 +409,25 @@ const processCampaign = async (messages, campaignId, templateName, languageCode,
         mediaUrl,
         bodyParams: msg.bodyParams,
         customMetaConfig,
+        senderPhoneId,
+        senderPhone,
       });
     }
   } else {
     console.log(`📨 Processing ${messages.length} messages in-memory`);
-    processInMemory(messages, campaignId, templateName, languageCode, io, mediaId, mediaType, mediaUrl, customMetaConfig).catch((err) => {
+    processInMemory(
+      messages,
+      campaignId,
+      templateName,
+      languageCode,
+      io,
+      mediaId,
+      mediaType,
+      mediaUrl,
+      customMetaConfig,
+      senderPhoneId,
+      senderPhone
+    ).catch((err) => {
       console.error("❌ In-memory campaign processing error:", err);
     });
   }

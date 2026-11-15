@@ -22,3 +22,4 @@
 - **Meta API Circuit Breaker & Exponential Backoff:** `backend/services/resilience.js` implements `withRetry` (exponential backoff + jitter for 429/5xx/network errors) and `CircuitBreaker` (`metaBreaker`) used by `sendTemplateMessage` and `sendTextMessage`.
 - **Startup & Shutdown:** `server.js` runs RBAC/index migrations on boot, prunes the IP violation map every 15 minutes, and handles `SIGTERM`/`SIGINT` gracefully.
 - **Backups:** `GET /api/backup/export` (Master Admin only) exports core tables as a structured JSON snapshot.
+

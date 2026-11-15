@@ -75,7 +75,26 @@ const startCampaignScheduler = (io) => {
 
           // Meta config resolution for sender
           let customMetaConfig = null;
-          if (campaign.whatsapp_mode === "personal" && campaign.meta_phone_number_id && campaign.meta_access_token) {
+          let senderPhoneId = campaign.sender_phone_number_id || null;
+          let senderPhone = campaign.sender_phone_number || null;
+
+          if (campaign.sender_channel_id) {
+            const chanRes = await db.query(
+              `SELECT phone_number_id, access_token, waba_id, display_phone_number, verified_name 
+               FROM public.user_whatsapp_channels WHERE id = $1`,
+              [campaign.sender_channel_id]
+            );
+            if (chanRes.rows.length > 0) {
+              const ch = chanRes.rows[0];
+              customMetaConfig = {
+                phoneId: ch.phone_number_id,
+                token: ch.access_token,
+                wabaId: ch.waba_id,
+              };
+              senderPhoneId = ch.phone_number_id;
+              senderPhone = ch.display_phone_number || ch.phone_number_id;
+            }
+          } else if (campaign.whatsapp_mode === "personal" && campaign.meta_phone_number_id && campaign.meta_access_token) {
             customMetaConfig = {
               phoneId: campaign.meta_phone_number_id,
               token: campaign.meta_access_token,
@@ -92,7 +111,9 @@ const startCampaignScheduler = (io) => {
             campaign.media_id,
             campaign.media_type,
             campaign.media_url,
-            customMetaConfig
+            customMetaConfig,
+            senderPhoneId,
+            senderPhone
           );
 
           await db.query("UPDATE public.campaigns SET status = 'completed' WHERE id = $1", [campaign.id]);

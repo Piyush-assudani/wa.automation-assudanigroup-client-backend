@@ -18,3 +18,4 @@
 ## 4. Data Privacy & Reliability
 - **No Hardcoded Secrets:** Credentials live strictly in environment variables (`.env`, excluded via `.gitignore`).
 - **Auditability & Backups:** `system_error_logs` records unhandled 5xx failures; `GET /api/backup/export` provides on-demand JSON backups for Master Admins.
+

@@ -102,21 +102,49 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-const getUserMetaConfig = async (req) => {
+const getUserMetaConfig = async (req, specificChannelId = null) => {
   try {
-    let effectiveUserId = req.targetUserId || req.user?.id;
-    if (!effectiveUserId && req.headers?.authorization && req.headers.authorization.startsWith("Bearer ")) {
+    let effectiveUserId = req?.targetUserId || req?.user?.id;
+    if (!effectiveUserId && req?.headers?.authorization && req.headers.authorization.startsWith("Bearer ")) {
       const token = req.headers.authorization.split(" ")[1];
       const decoded = jwt.decode(token);
       effectiveUserId = decoded?.id;
     }
     // SaaS Client Switcher header for Master Admin
-    if (req.headers && req.headers["x-client-id"]) {
+    if (req?.headers && req.headers["x-client-id"]) {
       effectiveUserId = req.headers["x-client-id"];
     }
     if (!effectiveUserId) return null;
 
     const db = require("../db");
+
+    // 1. Check if a specific sender channel is explicitly requested
+    const targetChannelId =
+      specificChannelId ||
+      req?.headers?.["x-channel-id"] ||
+      req?.query?.channel_id ||
+      req?.body?.sender_channel_id;
+
+    if (targetChannelId && targetChannelId !== "company" && isValidUuid(targetChannelId)) {
+      const chanRes = await db.query(
+        `SELECT id, phone_number_id, access_token, waba_id, display_phone_number, verified_name 
+         FROM public.user_whatsapp_channels 
+         WHERE id = $1 AND (user_id = $2 OR user_id IN (SELECT parent_client_id FROM public.users WHERE id = $2))`,
+        [targetChannelId, effectiveUserId]
+      );
+      if (chanRes.rows.length > 0) {
+        const c = chanRes.rows[0];
+        return {
+          channelId: c.id,
+          phoneId: c.phone_number_id.trim(),
+          token: c.access_token.trim(),
+          wabaId: c.waba_id ? c.waba_id.trim() : null,
+          displayPhone: c.display_phone_number,
+          verifiedName: c.verified_name,
+        };
+      }
+    }
+
     const userRes = await db.query(
       "SELECT whatsapp_mode, meta_phone_number_id, meta_access_token, meta_waba_id, parent_client_id FROM public.users WHERE id = $1",
       [effectiveUserId]
@@ -134,12 +162,34 @@ const getUserMetaConfig = async (req) => {
       }
     }
 
-    if (user && user.whatsapp_mode === "personal" && user.meta_phone_number_id && user.meta_access_token) {
-      return {
-        phoneId: user.meta_phone_number_id.trim(),
-        token: user.meta_access_token.trim(),
-        wabaId: user.meta_waba_id ? user.meta_waba_id.trim() : null,
-      };
+    // 2. Check if user has a default channel in user_whatsapp_channels
+    if (user && user.whatsapp_mode === "personal") {
+      const defaultChanRes = await db.query(
+        `SELECT id, phone_number_id, access_token, waba_id, display_phone_number, verified_name
+         FROM public.user_whatsapp_channels
+         WHERE user_id = $1 AND is_default = true
+         LIMIT 1`,
+        [effectiveUserId]
+      );
+      if (defaultChanRes.rows.length > 0) {
+        const c = defaultChanRes.rows[0];
+        return {
+          channelId: c.id,
+          phoneId: c.phone_number_id.trim(),
+          token: c.access_token.trim(),
+          wabaId: c.waba_id ? c.waba_id.trim() : null,
+          displayPhone: c.display_phone_number,
+          verifiedName: c.verified_name,
+        };
+      }
+
+      if (user.meta_phone_number_id && user.meta_access_token) {
+        return {
+          phoneId: user.meta_phone_number_id.trim(),
+          token: user.meta_access_token.trim(),
+          wabaId: user.meta_waba_id ? user.meta_waba_id.trim() : null,
+        };
+      }
     }
   } catch (err) {
     // fallback to platform company default

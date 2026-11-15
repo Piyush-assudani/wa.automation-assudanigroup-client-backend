@@ -18,3 +18,4 @@
 6. **Prepaid Wallet & Billing Ledger:** Real-time balance tracking (`marketing`, `utility`, `authentication`, `service`), atomic row-level locked deductions/recharges, and itemized ledger history.
 7. **Live Chat & Webhooks:** Real-time inbound/outbound WhatsApp messaging via Meta webhooks + Socket.IO, scoped strictly to contacts messaged by that tenant.
 8. **Resilience & Offline Awareness:** Network status banner, `visibilitychange` socket auto-reconnection, and graceful error/success notifications.
+

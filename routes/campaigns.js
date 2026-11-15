@@ -209,13 +209,65 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
       }
     }
 
-    const { scheduled_at } = req.body;
+    const { scheduled_at, sender_channel_id } = req.body;
     const isScheduled = scheduled_at && new Date(scheduled_at) > new Date();
     const initialStatus = isScheduled ? "scheduled" : "completed";
 
+    // Resolve Sender Channel & Meta API Configuration
+    let senderConfig = null;
+    let senderChannelId = null;
+    let senderPhoneId = null;
+    let senderPhone = null;
+    let senderName = null;
+
+    if (sender_channel_id && sender_channel_id !== "company" && isValidUuid(sender_channel_id)) {
+      const chanRes = await db.query(
+        `SELECT id, channel_name, phone_number_id, waba_id, access_token, display_phone_number, verified_name 
+         FROM public.user_whatsapp_channels 
+         WHERE id = $1 AND (user_id = $2 OR user_id IN (SELECT parent_client_id FROM public.users WHERE id = $2))`,
+        [sender_channel_id, effectiveUserId]
+      );
+      if (chanRes.rows.length > 0) {
+        const chan = chanRes.rows[0];
+        senderChannelId = chan.id;
+        senderPhoneId = chan.phone_number_id;
+        senderPhone = chan.display_phone_number || chan.phone_number_id;
+        senderName = chan.verified_name || chan.channel_name;
+        senderConfig = {
+          channelId: chan.id,
+          phoneId: chan.phone_number_id.trim(),
+          token: chan.access_token.trim(),
+          wabaId: chan.waba_id ? chan.waba_id.trim() : null,
+          displayPhone: chan.display_phone_number,
+          verifiedName: chan.verified_name,
+        };
+      }
+    } else if (sender_channel_id === "company") {
+      senderPhoneId = process.env.WHATSAPP_PHONE_NUMBER_ID || null;
+      senderPhone = process.env.COMPANY_WHATSAPP_NUMBER || process.env.META_DISPLAY_PHONE_NUMBER || null;
+      senderName = "Company WhatsApp Central";
+      senderConfig = null;
+    } else {
+      senderConfig = await getUserMetaConfig(req);
+      if (senderConfig && senderConfig.channelId) {
+        senderChannelId = senderConfig.channelId;
+        senderPhoneId = senderConfig.phoneId;
+        senderPhone = senderConfig.displayPhone || senderConfig.phoneId;
+        senderName = senderConfig.verifiedName || "Personal WhatsApp";
+      } else if (senderConfig && senderConfig.phoneId) {
+        senderPhoneId = senderConfig.phoneId;
+        senderPhone = senderConfig.displayPhone || senderConfig.phoneId;
+        senderName = senderConfig.verifiedName || "Personal WhatsApp";
+      } else {
+        senderPhoneId = process.env.WHATSAPP_PHONE_NUMBER_ID || null;
+        senderPhone = process.env.COMPANY_WHATSAPP_NUMBER || process.env.META_DISPLAY_PHONE_NUMBER || null;
+        senderName = "Company WhatsApp Central";
+      }
+    }
+
     const campaignResult = await db.query(
-      `INSERT INTO campaigns (name, template_name, contact_list_id, media_id, media_type, media_url, total_sent, user_id, scheduled_at, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9)
+      `INSERT INTO campaigns (name, template_name, contact_list_id, media_id, media_type, media_url, total_sent, user_id, scheduled_at, status, sender_channel_id, sender_phone_number_id, sender_phone_number, sender_name)
+       VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9, $10, $11, $12, $13)
        RETURNING *`,
       [
         name.trim().slice(0, 255),
@@ -227,6 +279,10 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
         effectiveUserId,
         isScheduled ? new Date(scheduled_at).toISOString() : null,
         initialStatus,
+        senderChannelId,
+        senderPhoneId,
+        senderPhone,
+        senderName,
       ]
     );
     const campaign = campaignResult.rows[0];
@@ -254,7 +310,6 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
 
     if (!isScheduled) {
       const io = req.app.get("io");
-      const customMetaConfig = await getUserMetaConfig(req);
       // Run campaign processing asynchronously in background so response returns instantly
       processCampaign(
         messages,
@@ -265,7 +320,9 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
         media_id,
         media_type,
         media_url,
-        customMetaConfig
+        senderConfig,
+        senderPhoneId,
+        senderPhone
       ).catch((err) => console.error("❌ Background campaign processing error:", err.message));
     }
 
@@ -385,6 +442,25 @@ router.get("/:id", async (req, res) => {
       [id]
     );
 
+    const senderBreakdown = await db.query(
+      `SELECT
+        COALESCE(m.sender_phone_number, c.sender_phone_number, 'Default Channel') as sender_phone_number,
+        COALESCE(m.sender_phone_number_id, c.sender_phone_number_id, 'default') as sender_phone_number_id,
+        COALESCE(c.sender_name, 'WhatsApp Channel') as sender_name,
+        COUNT(*) as total_messages,
+        COUNT(*) FILTER (WHERE m.status IN ('sent', 'delivered', 'read')) as total_successful,
+        COUNT(*) FILTER (WHERE m.status = 'delivered') as delivered_count,
+        COUNT(*) FILTER (WHERE m.status = 'read') as read_count,
+        COUNT(*) FILTER (WHERE m.status = 'sent') as sent_count,
+        COUNT(*) FILTER (WHERE m.status = 'failed') as failed_count
+       FROM messages m
+       LEFT JOIN campaigns c ON m.campaign_id = c.id
+       WHERE m.campaign_id = $1
+       GROUP BY m.sender_phone_number, m.sender_phone_number_id, c.sender_phone_number, c.sender_phone_number_id, c.sender_name
+       ORDER BY total_messages DESC`,
+      [id]
+    );
+
     const camp = campaignResult.rows[0];
     const publicBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
     if (camp && camp.media_url && publicBaseUrl) {
@@ -394,6 +470,7 @@ router.get("/:id", async (req, res) => {
     res.json({
       ...camp,
       stats: statsResult.rows,
+      sender_breakdown: senderBreakdown.rows,
     });
   } catch (err) {
     console.error("❌ Campaign detail error:", err);
@@ -414,7 +491,9 @@ router.get("/:id/recipients", async (req, res) => {
     }
 
     const result = await db.query(
-      `SELECT m.id, c.phone_number, c.name, m.status, m.timestamp, m.error_message
+      `SELECT m.id, c.phone_number, c.name, m.status, m.timestamp, m.error_message,
+              COALESCE(m.sender_phone_number, 'Default') as sender_phone_number,
+              m.sender_phone_number_id
        FROM messages m
        JOIN contacts c ON m.contact_id = c.id
        WHERE m.campaign_id = $1
@@ -673,9 +752,12 @@ router.get("/:id/export", async (req, res) => {
     const campaign = campResult.rows[0];
 
     const result = await db.query(
-      `SELECT m.id, c.name, c.phone_number, m.status, m.error_message, m.timestamp
+      `SELECT m.id, c.name, c.phone_number, m.status, m.error_message, m.timestamp,
+              COALESCE(m.sender_phone_number, campaign_sender.sender_phone_number, 'Default') as sender_phone_number,
+              COALESCE(m.sender_phone_number_id, campaign_sender.sender_phone_number_id, '') as sender_phone_number_id
        FROM messages m
        JOIN contacts c ON m.contact_id = c.id
+       LEFT JOIN (SELECT id, sender_phone_number, sender_phone_number_id FROM campaigns WHERE id = $1) campaign_sender ON true
        WHERE m.campaign_id = $1
        ORDER BY m.timestamp DESC`,
       [id]
@@ -706,6 +788,8 @@ router.get("/:id/export", async (req, res) => {
         "S.No": index + 1,
         "Campaign Name": campaign.name,
         "Template Name": campaign.template_name,
+        "Sender Number": r.sender_phone_number,
+        "Sender Phone ID": r.sender_phone_number_id,
         "Recipient Name": r.name || "N/A",
         "Phone Number": `+${r.phone_number}`,
         "Delivery Status": derivedStatus,
@@ -723,6 +807,8 @@ router.get("/:id/export", async (req, res) => {
       { wch: 6 },  // S.No
       { wch: 22 }, // Campaign Name
       { wch: 20 }, // Template Name
+      { wch: 20 }, // Sender Number
+      { wch: 20 }, // Sender Phone ID
       { wch: 22 }, // Recipient Name
       { wch: 18 }, // Phone Number
       { wch: 18 }, // Delivery Status

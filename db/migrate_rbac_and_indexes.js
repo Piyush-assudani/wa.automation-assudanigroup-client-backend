@@ -145,6 +145,39 @@ async function runRbacAndIndexMigration() {
     CREATE INDEX IF NOT EXISTS idx_wallet_tx_user_created ON public.wallet_transactions(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_wallet_tx_user_type_status ON public.wallet_transactions(user_id, type, status);
     CREATE INDEX IF NOT EXISTS idx_client_templates_user_name ON public.client_templates(user_id, LOWER(template_name));
+
+    -- ============================================
+    -- 4. Multi-Sender WhatsApp Channels & Message Provenance
+    -- ============================================
+    CREATE TABLE IF NOT EXISTS public.user_whatsapp_channels (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+      channel_name VARCHAR(255) NOT NULL,
+      phone_number_id VARCHAR(255) NOT NULL,
+      waba_id VARCHAR(255),
+      access_token TEXT NOT NULL,
+      display_phone_number VARCHAR(100),
+      verified_name VARCHAR(255),
+      status VARCHAR(50) DEFAULT 'active',
+      is_default BOOLEAN DEFAULT false,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (user_id, phone_number_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_user_whatsapp_channels_user ON public.user_whatsapp_channels(user_id);
+
+    ALTER TABLE public.campaigns
+      ADD COLUMN IF NOT EXISTS sender_channel_id UUID REFERENCES public.user_whatsapp_channels(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS sender_phone_number_id VARCHAR(255),
+      ADD COLUMN IF NOT EXISTS sender_phone_number VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS sender_name VARCHAR(255);
+
+    ALTER TABLE public.messages
+      ADD COLUMN IF NOT EXISTS sender_phone_number_id VARCHAR(255),
+      ADD COLUMN IF NOT EXISTS sender_phone_number VARCHAR(100);
+
+    CREATE INDEX IF NOT EXISTS idx_messages_sender_phone_id ON public.messages(sender_phone_number_id);
+    CREATE INDEX IF NOT EXISTS idx_campaigns_sender_channel ON public.campaigns(sender_channel_id);
   `;
 
   await db.query(sql);
@@ -161,3 +194,4 @@ if (require.main === module) {
 }
 
 module.exports = { runRbacAndIndexMigration };
+

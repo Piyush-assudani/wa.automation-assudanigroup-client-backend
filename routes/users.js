@@ -193,6 +193,195 @@ router.post("/test-meta", async (req, res) => {
   }
 });
 
+/**
+ * GET /api/users/channels
+ * Returns all configured WhatsApp sender channels for the active user/tenant
+ */
+router.get("/channels", async (req, res) => {
+  try {
+    const effectiveUserId = req.targetUserId || req.user.id;
+    const channelsRes = await db.query(
+      `SELECT id, channel_name, phone_number_id, waba_id, display_phone_number, verified_name, status, is_default, created_at
+       FROM public.user_whatsapp_channels
+       WHERE user_id = $1
+       ORDER BY is_default DESC, created_at ASC`,
+      [effectiveUserId]
+    );
+
+    const userRes = await db.query(
+      `SELECT whatsapp_mode, meta_phone_number_id, meta_display_phone_number, meta_verified_name FROM public.users WHERE id = $1`,
+      [effectiveUserId]
+    );
+    const user = userRes.rows[0];
+
+    const companyConfig = {
+      id: "company",
+      channel_name: `Company WhatsApp Central (${process.env.COMPANY_WHATSAPP_NUMBER || process.env.META_DISPLAY_PHONE_NUMBER || "Default"})`,
+      phone_number_id: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
+      waba_id: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "",
+      display_phone_number: process.env.COMPANY_WHATSAPP_NUMBER || process.env.META_DISPLAY_PHONE_NUMBER || "",
+      verified_name: "Assudani WA Automations (Company Default)",
+      is_default: user?.whatsapp_mode === "company" && channelsRes.rows.length === 0,
+      is_company: true,
+    };
+
+    return res.json({
+      channels: channelsRes.rows,
+      company: companyConfig,
+      active_mode: user?.whatsapp_mode || "company",
+    });
+  } catch (err) {
+    console.error("Get channels error:", err);
+    return res.status(500).json({ error: "Failed to retrieve WhatsApp sender channels." });
+  }
+});
+
+/**
+ * POST /api/users/channels
+ * Add or update a WhatsApp sender channel with live Meta API verification
+ */
+router.post("/channels", async (req, res) => {
+  const { channel_name, phone_number_id, waba_id, access_token, is_default } = req.body || {};
+
+  if (!phone_number_id || !access_token) {
+    return res.status(400).json({ error: "Phone Number ID and Access Token are required." });
+  }
+
+  const cleanPhoneId = String(phone_number_id).trim();
+  const cleanToken = String(access_token).trim();
+  const cleanWabaId = waba_id ? String(waba_id).trim() : null;
+
+  try {
+    const effectiveUserId = req.targetUserId || req.user.id;
+
+    // Verify channel with Meta
+    let verifiedName = null;
+    let displayPhone = null;
+    try {
+      const metaRes = await getAccountHealth(cleanPhoneId, cleanToken);
+      if (metaRes.success && metaRes.data) {
+        verifiedName = metaRes.data.verified_name || null;
+        displayPhone = metaRes.data.display_phone_number || null;
+      }
+    } catch (metaErr) {
+      console.warn("Meta verification check warning:", metaErr.message);
+    }
+
+    const displayName =
+      (channel_name && String(channel_name).trim()) ||
+      `${verifiedName || "WhatsApp Number"} (${displayPhone || cleanPhoneId})`;
+
+    if (is_default) {
+      await db.query(`UPDATE public.user_whatsapp_channels SET is_default = false WHERE user_id = $1`, [effectiveUserId]);
+    }
+
+    const insertRes = await db.query(
+      `INSERT INTO public.user_whatsapp_channels 
+        (user_id, channel_name, phone_number_id, waba_id, access_token, display_phone_number, verified_name, is_default)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (user_id, phone_number_id) DO UPDATE SET
+         channel_name = EXCLUDED.channel_name,
+         waba_id = EXCLUDED.waba_id,
+         access_token = EXCLUDED.access_token,
+         display_phone_number = EXCLUDED.display_phone_number,
+         verified_name = EXCLUDED.verified_name,
+         is_default = CASE WHEN EXCLUDED.is_default THEN true ELSE user_whatsapp_channels.is_default END
+       RETURNING *`,
+      [effectiveUserId, displayName, cleanPhoneId, cleanWabaId, cleanToken, displayPhone, verifiedName, !!is_default]
+    );
+
+    // If marked default, sync to user's primary columns as well
+    if (is_default) {
+      await db.query(
+        `UPDATE public.users SET
+          whatsapp_mode = 'personal',
+          meta_phone_number_id = $1,
+          meta_waba_id = $2,
+          meta_access_token = $3,
+          meta_display_phone_number = $4,
+          meta_verified_name = $5
+         WHERE id = $6`,
+        [cleanPhoneId, cleanWabaId, cleanToken, displayPhone, verifiedName, effectiveUserId]
+      );
+    }
+
+    return res.status(201).json({
+      message: "WhatsApp sender channel configured successfully!",
+      channel: insertRes.rows[0],
+    });
+  } catch (err) {
+    console.error("Save channel error:", err);
+    return res.status(500).json({ error: "Failed to configure WhatsApp channel: " + err.message });
+  }
+});
+
+/**
+ * PATCH /api/users/channels/:id/default
+ * Sets a specific channel as default sender for the client
+ */
+router.patch("/channels/:id/default", async (req, res) => {
+  const { id } = req.params;
+  const effectiveUserId = req.targetUserId || req.user.id;
+
+  try {
+    const chanRes = await db.query(
+      `SELECT * FROM public.user_whatsapp_channels WHERE id = $1 AND user_id = $2`,
+      [id, effectiveUserId]
+    );
+
+    if (chanRes.rows.length === 0) {
+      return res.status(404).json({ error: "Channel not found." });
+    }
+
+    const chan = chanRes.rows[0];
+
+    await db.query(`UPDATE public.user_whatsapp_channels SET is_default = false WHERE user_id = $1`, [effectiveUserId]);
+    await db.query(`UPDATE public.user_whatsapp_channels SET is_default = true WHERE id = $1`, [id]);
+
+    await db.query(
+      `UPDATE public.users SET
+        whatsapp_mode = 'personal',
+        meta_phone_number_id = $1,
+        meta_waba_id = $2,
+        meta_access_token = $3,
+        meta_display_phone_number = $4,
+        meta_verified_name = $5
+       WHERE id = $6`,
+      [chan.phone_number_id, chan.waba_id, chan.access_token, chan.display_phone_number, chan.verified_name, effectiveUserId]
+    );
+
+    return res.json({ message: "Default WhatsApp sender channel updated!", channel: chan });
+  } catch (err) {
+    console.error("Set default channel error:", err);
+    return res.status(500).json({ error: "Failed to update default channel." });
+  }
+});
+
+/**
+ * DELETE /api/users/channels/:id
+ * Remove a configured sender channel
+ */
+router.delete("/channels/:id", async (req, res) => {
+  const { id } = req.params;
+  const effectiveUserId = req.targetUserId || req.user.id;
+
+  try {
+    const delRes = await db.query(
+      `DELETE FROM public.user_whatsapp_channels WHERE id = $1 AND user_id = $2 RETURNING id, channel_name`,
+      [id, effectiveUserId]
+    );
+
+    if (delRes.rows.length === 0) {
+      return res.status(404).json({ error: "Channel not found." });
+    }
+
+    return res.json({ message: "WhatsApp channel deleted successfully." });
+  } catch (err) {
+    console.error("Delete channel error:", err);
+    return res.status(500).json({ error: "Failed to delete channel." });
+  }
+});
+
 // ============================================
 // MASTER ADMIN ONLY USER MANAGEMENT (SaaS)
 // ============================================
