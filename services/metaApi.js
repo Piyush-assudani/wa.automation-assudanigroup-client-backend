@@ -611,6 +611,40 @@ const getAccountHealth = async (customPhoneId = null, customToken = null) => {
   }
 };
 
+const deleteTemplate = async (name, hsmId = null, customConfig = null) => {
+  const { apiBase, token, wabaId } = getMetaConfig(customConfig);
+
+  if (!token || !wabaId) {
+    throw new Error("Meta WABA_ID or Access Token is missing in backend .env.");
+  }
+
+  try {
+    const params = { name };
+    if (hsmId) {
+      params.hsm_id = hsmId;
+    }
+
+    const response = await axios.delete(`${apiBase}/${wabaId}/message_templates`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      params,
+      timeout: 15000,
+    });
+
+    return response.data || { success: true };
+  } catch (err) {
+    console.error("❌ Meta API deleteTemplate error:", err.response?.data || err.message);
+    const metaErr = err.response?.data?.error;
+    // If template is already not found on Meta, treat as success
+    if (metaErr?.code === 100 && metaErr?.error_subcode === 2593002) {
+      return { success: true, not_found: true };
+    }
+    const errorDetail = metaErr?.error_user_msg || metaErr?.message || err.message;
+    throw new Error(errorDetail);
+  }
+};
+
 module.exports = {
   sendTemplateMessage,
   sendTextMessage,
@@ -618,6 +652,7 @@ module.exports = {
   downloadMediaFromMeta,
   getTemplates,
   createTemplate,
+  deleteTemplate,
   sendMediaMessage,
   sendMediaById,
   getAccountHealth,
