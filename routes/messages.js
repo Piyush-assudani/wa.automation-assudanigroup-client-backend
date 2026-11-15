@@ -465,21 +465,35 @@ router.post("/:contactId/template", async (req, res) => {
     if (explicitTplChannelId) {
       userMetaConfig = await getUserMetaConfig(req, explicitTplChannelId);
     } else {
-      const lastInboundTpl = await db.query(
-        `SELECT sender_phone_number_id FROM messages 
-         WHERE contact_id = $1 AND direction = 'inbound' AND sender_phone_number_id IS NOT NULL 
-         ORDER BY timestamp DESC LIMIT 1`,
-        [contactId]
-      );
-      if (lastInboundTpl.rows.length > 0) {
-        const chanRes = await db.query(
-          `SELECT id FROM public.user_whatsapp_channels 
-           WHERE phone_number_id = $1 AND (user_id = $2 OR user_id IN (SELECT parent_client_id FROM public.users WHERE id = $2))
-           LIMIT 1`,
-          [lastInboundTpl.rows[0].sender_phone_number_id, effectiveUserId]
+      // 1. Try to find if this template is mapped to a specific channel
+      const tplRecord = await db.query(
+        `SELECT ct.channel_name, c.id AS channel_id 
+         FROM public.client_templates ct
+         JOIN public.user_whatsapp_channels c ON (c.phone_number_id = ct.phone_number_id OR c.waba_id = ct.waba_id)
+         WHERE ct.user_id = $1 AND LOWER(ct.template_name) = LOWER($2)
+         LIMIT 1`,
+        [effectiveUserId, template_name.trim()]
+      ).catch(() => ({ rows: [] }));
+
+      if (tplRecord.rows.length > 0 && tplRecord.rows[0].channel_id) {
+        userMetaConfig = await getUserMetaConfig(req, tplRecord.rows[0].channel_id);
+      } else {
+        const lastInboundTpl = await db.query(
+          `SELECT sender_phone_number_id FROM messages 
+           WHERE contact_id = $1 AND direction = 'inbound' AND sender_phone_number_id IS NOT NULL 
+           ORDER BY timestamp DESC LIMIT 1`,
+          [contactId]
         );
-        if (chanRes.rows.length > 0) {
-          userMetaConfig = await getUserMetaConfig(req, chanRes.rows[0].id);
+        if (lastInboundTpl.rows.length > 0) {
+          const chanRes = await db.query(
+            `SELECT id FROM public.user_whatsapp_channels 
+             WHERE phone_number_id = $1 AND (user_id = $2 OR user_id IN (SELECT parent_client_id FROM public.users WHERE id = $2))
+             LIMIT 1`,
+            [lastInboundTpl.rows[0].sender_phone_number_id, effectiveUserId]
+          );
+          if (chanRes.rows.length > 0) {
+            userMetaConfig = await getUserMetaConfig(req, chanRes.rows[0].id);
+          }
         }
       }
     }
@@ -488,13 +502,47 @@ router.post("/:contactId/template", async (req, res) => {
       userMetaConfig = await getUserMetaConfig(req);
     }
 
-    const result = await sendTemplateMessage(
+    let result = await sendTemplateMessage(
       contact.phone_number,
       template_name.trim(),
       language_code,
       Array.isArray(components) ? components : [],
       userMetaConfig
     );
+
+    // If template was not found on this channel (#132001), auto-try other tenant channels where template may be approved
+    if (!result.success && result.error && (result.error.includes("does not exist") || result.error.includes("132001"))) {
+      const otherChannels = await db.query(
+        `SELECT id, phone_number_id, access_token, waba_id, display_phone_number, verified_name
+         FROM public.user_whatsapp_channels
+         WHERE (user_id = $1 OR user_id IN (SELECT parent_client_id FROM public.users WHERE id = $1))
+           AND id != $2`,
+        [effectiveUserId, userMetaConfig?.channelId || '00000000-0000-0000-0000-000000000000']
+      ).catch(() => ({ rows: [] }));
+
+      for (const altChan of (otherChannels.rows || [])) {
+        const altConfig = {
+          channelId: altChan.id,
+          phoneId: altChan.phone_number_id.trim(),
+          token: altChan.access_token.trim(),
+          wabaId: altChan.waba_id ? altChan.waba_id.trim() : null,
+          displayPhone: altChan.display_phone_number,
+          verifiedName: altChan.verified_name,
+        };
+        const altResult = await sendTemplateMessage(
+          contact.phone_number,
+          template_name.trim(),
+          language_code,
+          Array.isArray(components) ? components : [],
+          altConfig
+        );
+        if (altResult.success) {
+          result = altResult;
+          userMetaConfig = altConfig;
+          break;
+        }
+      }
+    }
 
     if (!result.success) {
       if (effectiveUserId && fundTxId) {

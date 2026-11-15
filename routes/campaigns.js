@@ -627,6 +627,121 @@ router.post("/:id/retry", async (req, res) => {
       else mediaType = "image";
     }
 
+    // If retrying all or category-based failed recipients, spawn a NEW dedicated campaign
+    if (!message_id) {
+      let newCampaignName = `${campaign.name} (Failed Retry Campaign)`;
+      const existingNameCheck = await db.query(
+        "SELECT id FROM campaigns WHERE name = $1 AND user_id = $2",
+        [newCampaignName, campaign.user_id]
+      );
+      if (existingNameCheck.rows.length > 0) {
+        newCampaignName = `${campaign.name} (Failed Retry Campaign - ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`;
+      }
+
+      const listName = `${campaign.name} - Failed Recipients (${toRetry.length})`;
+      const listRes = await db.query(
+        "INSERT INTO contact_lists (name, user_id) VALUES ($1, $2) RETURNING id",
+        [listName.slice(0, 255), campaign.user_id]
+      );
+      const newContactListId = listRes.rows[0].id;
+
+      for (const msg of toRetry) {
+        await db.query(
+          "INSERT INTO contact_list_members (list_id, contact_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+          [newContactListId, msg.contact_id]
+        );
+      }
+
+      let senderConfig = null;
+      let senderChannelId = campaign.sender_channel_id;
+      let senderPhoneId = campaign.sender_phone_number_id;
+      let senderPhone = campaign.sender_phone_number;
+      let senderName = campaign.sender_name;
+
+      if (senderChannelId) {
+        const chanRes = await db.query(
+          "SELECT * FROM public.user_whatsapp_channels WHERE id = $1",
+          [senderChannelId]
+        );
+        if (chanRes.rows.length > 0) {
+          const ch = chanRes.rows[0];
+          senderConfig = {
+            channelId: ch.id,
+            phoneId: ch.phone_number_id.trim(),
+            token: ch.access_token.trim(),
+            wabaId: ch.waba_id ? ch.waba_id.trim() : null,
+            displayPhone: ch.display_phone_number,
+            verifiedName: ch.verified_name,
+          };
+          senderPhoneId = ch.phone_number_id;
+          senderPhone = ch.display_phone_number || ch.phone_number_id;
+          senderName = ch.verified_name || ch.channel_name;
+        }
+      }
+
+      if (!senderConfig) {
+        senderConfig = await getUserMetaConfig(req);
+      }
+
+      const newCampRes = await db.query(
+        `INSERT INTO campaigns (
+           name, template_name, contact_list_id, media_id, media_type, media_url,
+           total_sent, user_id, scheduled_at, status, sender_channel_id,
+           sender_phone_number_id, sender_phone_number, sender_name
+         ) VALUES ($1, $2, $3, $4, $5, $6, 0, $7, NULL, 'completed', $8, $9, $10, $11)
+         RETURNING *`,
+        [
+          newCampaignName.slice(0, 255),
+          campaign.template_name,
+          newContactListId,
+          campaign.media_id,
+          campaign.media_type,
+          campaign.media_url,
+          campaign.user_id,
+          senderChannelId,
+          senderPhoneId,
+          senderPhone,
+          senderName,
+        ]
+      );
+      const newCampaign = newCampRes.rows[0];
+
+      const retryMessages = toRetry.map((msg) => {
+        const bodyParams = [];
+        if (hasBodyParam) {
+          bodyParams.push({ type: "text", text: msg.name || "Customer" });
+        }
+        return {
+          to: msg.phone_number ? String(msg.phone_number).replace(/\D/g, "") : "",
+          contactId: msg.contact_id,
+          bodyParams,
+        };
+      });
+
+      const io = req.app.get("io");
+      processCampaign(
+        retryMessages,
+        newCampaign.id,
+        newCampaign.template_name,
+        campaign.language_code || "en_US",
+        io,
+        newCampaign.media_id,
+        newCampaign.media_type,
+        newCampaign.media_url,
+        senderConfig,
+        senderPhoneId,
+        senderPhone
+      ).catch((err) => console.error("❌ Background retry campaign processing error:", err.message));
+
+      return res.json({
+        success: true,
+        message: `Created new retry campaign "${newCampaign.name}" with ${toRetry.length} failed recipients.`,
+        new_campaign_id: newCampaign.id,
+        new_campaign: newCampaign,
+        retried: toRetry.length,
+      });
+    }
+
     let successCount = 0;
     let failCount = 0;
     const io = req.app.get("io");
