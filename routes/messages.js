@@ -257,7 +257,7 @@ router.post("/:contactId", async (req, res) => {
 
     // Check 24-hour service window
     const lastInbound = await db.query(
-      `SELECT timestamp FROM messages
+      `SELECT timestamp, sender_phone_number_id, sender_phone_number FROM messages
        WHERE contact_id = $1 AND direction = 'inbound' AND timestamp IS NOT NULL
        ORDER BY timestamp DESC NULLS LAST
        LIMIT 1`,
@@ -319,7 +319,28 @@ router.post("/:contactId", async (req, res) => {
       }
     }
 
-    const userMetaConfig = await getUserMetaConfig(req);
+    // Auto-detect which channel this contact is messaging with (so customer service window matches)
+    let userMetaConfig = null;
+    const explicitChannelId = req.body?.channel_id || req.body?.sender_channel_id || req.headers["x-channel-id"];
+
+    if (explicitChannelId) {
+      userMetaConfig = await getUserMetaConfig(req, explicitChannelId);
+    } else if (lastInbound.rows[0]?.sender_phone_number_id) {
+      const chanRes = await db.query(
+        `SELECT id FROM public.user_whatsapp_channels 
+         WHERE phone_number_id = $1 AND (user_id = $2 OR user_id IN (SELECT parent_client_id FROM public.users WHERE id = $2))
+         LIMIT 1`,
+        [lastInbound.rows[0].sender_phone_number_id, effectiveUserId]
+      );
+      if (chanRes.rows.length > 0) {
+        userMetaConfig = await getUserMetaConfig(req, chanRes.rows[0].id);
+      }
+    }
+
+    if (!userMetaConfig) {
+      userMetaConfig = await getUserMetaConfig(req);
+    }
+
     let result;
     if (isImage) {
       result = await sendMediaMessage(contact.phone_number, trimmedMessage, "image", userMetaConfig);
@@ -348,10 +369,10 @@ router.post("/:contactId", async (req, res) => {
     const mediaUrl = isImage ? trimmedMessage : null;
 
     const msgResult = await db.query(
-      `INSERT INTO messages (contact_id, direction, message_body, media_url, meta_message_id, status, timestamp)
-       VALUES ($1, 'outbound', $2, $3, $4, 'sent', NOW())
+      `INSERT INTO messages (contact_id, direction, message_body, media_url, meta_message_id, status, timestamp, sender_phone_number_id, sender_phone_number)
+       VALUES ($1, 'outbound', $2, $3, $4, 'sent', NOW(), $5, $6)
        RETURNING *`,
-      [contactId, displayBody, mediaUrl, result.messageId]
+      [contactId, displayBody, mediaUrl, result.messageId, userMetaConfig?.phoneId || null, userMetaConfig?.displayPhone || null]
     );
 
     const savedMessage = msgResult.rows[0];
@@ -437,7 +458,36 @@ router.post("/:contactId/template", async (req, res) => {
       }
     }
 
-    const userMetaConfig = await getUserMetaConfig(req);
+    // Auto-detect which channel this contact is messaging with
+    let userMetaConfig = null;
+    const explicitTplChannelId = req.body?.channel_id || req.body?.sender_channel_id || req.headers["x-channel-id"];
+
+    if (explicitTplChannelId) {
+      userMetaConfig = await getUserMetaConfig(req, explicitTplChannelId);
+    } else {
+      const lastInboundTpl = await db.query(
+        `SELECT sender_phone_number_id FROM messages 
+         WHERE contact_id = $1 AND direction = 'inbound' AND sender_phone_number_id IS NOT NULL 
+         ORDER BY timestamp DESC LIMIT 1`,
+        [contactId]
+      );
+      if (lastInboundTpl.rows.length > 0) {
+        const chanRes = await db.query(
+          `SELECT id FROM public.user_whatsapp_channels 
+           WHERE phone_number_id = $1 AND (user_id = $2 OR user_id IN (SELECT parent_client_id FROM public.users WHERE id = $2))
+           LIMIT 1`,
+          [lastInboundTpl.rows[0].sender_phone_number_id, effectiveUserId]
+        );
+        if (chanRes.rows.length > 0) {
+          userMetaConfig = await getUserMetaConfig(req, chanRes.rows[0].id);
+        }
+      }
+    }
+
+    if (!userMetaConfig) {
+      userMetaConfig = await getUserMetaConfig(req);
+    }
+
     const result = await sendTemplateMessage(
       contact.phone_number,
       template_name.trim(),
@@ -476,10 +526,10 @@ router.post("/:contactId/template", async (req, res) => {
     }
 
     const msgResult = await db.query(
-      `INSERT INTO messages (contact_id, direction, message_body, media_url, meta_message_id, status, timestamp)
-       VALUES ($1, 'outbound', $2, $3, $4, 'sent', NOW())
+      `INSERT INTO messages (contact_id, direction, message_body, media_url, meta_message_id, status, timestamp, sender_phone_number_id, sender_phone_number)
+       VALUES ($1, 'outbound', $2, $3, $4, 'sent', NOW(), $5, $6)
        RETURNING *`,
-      [contactId, `[Template: ${template_name.trim()}]`, templateMediaUrl, result.messageId]
+      [contactId, `[Template: ${template_name.trim()}]`, templateMediaUrl, result.messageId, userMetaConfig?.phoneId || null, userMetaConfig?.displayPhone || null]
     );
 
     const savedMessage = msgResult.rows[0];
@@ -603,7 +653,35 @@ router.post("/:contactId/media", upload.single("file"), async (req, res) => {
       }
     }
 
-    const userMetaConfig = await getUserMetaConfig(req);
+    // Auto-detect which channel this contact is messaging with
+    let userMetaConfig = null;
+    const explicitMediaChannelId = req.body?.channel_id || req.body?.sender_channel_id || req.headers["x-channel-id"];
+
+    if (explicitMediaChannelId) {
+      userMetaConfig = await getUserMetaConfig(req, explicitMediaChannelId);
+    } else {
+      const lastInboundMedia = await db.query(
+        `SELECT sender_phone_number_id FROM messages 
+         WHERE contact_id = $1 AND direction = 'inbound' AND sender_phone_number_id IS NOT NULL 
+         ORDER BY timestamp DESC LIMIT 1`,
+        [contactId]
+      );
+      if (lastInboundMedia.rows.length > 0) {
+        const chanRes = await db.query(
+          `SELECT id FROM public.user_whatsapp_channels 
+           WHERE phone_number_id = $1 AND (user_id = $2 OR user_id IN (SELECT parent_client_id FROM public.users WHERE id = $2))
+           LIMIT 1`,
+          [lastInboundMedia.rows[0].sender_phone_number_id, effectiveUserId]
+        );
+        if (chanRes.rows.length > 0) {
+          userMetaConfig = await getUserMetaConfig(req, chanRes.rows[0].id);
+        }
+      }
+    }
+
+    if (!userMetaConfig) {
+      userMetaConfig = await getUserMetaConfig(req);
+    }
 
     // 1. Upload to Meta first directly using temp stream
     let metaMediaId = null;
@@ -643,9 +721,9 @@ router.post("/:contactId/media", upload.single("file"), async (req, res) => {
 
     // Save to database
     const msgResult = await db.query(
-      `INSERT INTO messages (contact_id, direction, message_body, media_url, meta_message_id, status, timestamp)
-       VALUES ($1, 'outbound', $2, $3, $4, 'sent', NOW()) RETURNING *`,
-      [contactId, displayBody, mediaUrl, result.messageId]
+      `INSERT INTO messages (contact_id, direction, message_body, media_url, meta_message_id, status, timestamp, sender_phone_number_id, sender_phone_number)
+       VALUES ($1, 'outbound', $2, $3, $4, 'sent', NOW(), $5, $6) RETURNING *`,
+      [contactId, displayBody, mediaUrl, result.messageId, userMetaConfig?.phoneId || null, userMetaConfig?.displayPhone || null]
     );
 
     const savedMessage = msgResult.rows[0];

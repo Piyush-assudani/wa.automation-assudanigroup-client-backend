@@ -59,6 +59,9 @@ router.post("/", async (req, res) => {
 
         // ─── Handle incoming messages ───
         if (value.messages && value.messages.length > 0) {
+          const destPhoneId = value.metadata?.phone_number_id || null;
+          const destPhone = value.metadata?.display_phone_number || null;
+
           for (const message of value.messages) {
             try {
               const from = message.from;
@@ -178,6 +181,15 @@ router.post("/", async (req, res) => {
                   );
                   if (listOwner.rows.length > 0 && listOwner.rows[0].user_id) {
                     assignedUserId = listOwner.rows[0].user_id;
+                  } else if (destPhoneId) {
+                    // Match to tenant channel who owns this receiver phone number
+                    const chanOwner = await db.query(
+                      "SELECT user_id FROM public.user_whatsapp_channels WHERE phone_number_id = $1 LIMIT 1",
+                      [destPhoneId]
+                    );
+                    if (chanOwner.rows.length > 0 && chanOwner.rows[0].user_id) {
+                      assignedUserId = chanOwner.rows[0].user_id;
+                    }
                   }
                 }
               }
@@ -214,12 +226,12 @@ router.post("/", async (req, res) => {
                 console.log(`✅ Contact ${from} requested Opt-In (START). Resumed.`);
               }
 
-              // Save the message
+              // Save the message with receiver phone number details
               const msgResult = await db.query(
-                `INSERT INTO messages (contact_id, direction, message_body, media_url, meta_message_id, status, timestamp)
-                 VALUES ($1, 'inbound', $2, $3, $4, 'delivered', to_timestamp($5::numeric))
+                `INSERT INTO messages (contact_id, direction, message_body, media_url, meta_message_id, status, timestamp, sender_phone_number_id, sender_phone_number)
+                 VALUES ($1, 'inbound', $2, $3, $4, 'delivered', to_timestamp($5::numeric), $6, $7)
                  RETURNING *`,
-                [contact.id, messageBody, mediaUrl, wamid, timestamp]
+                [contact.id, messageBody, mediaUrl, wamid, timestamp, destPhoneId, destPhone]
               );
 
               const savedMessage = msgResult.rows[0];
