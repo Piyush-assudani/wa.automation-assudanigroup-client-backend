@@ -2,7 +2,12 @@ const express = require("express");
 const router = express.Router();
 const multer = require("multer");
 const db = require("../db");
-const { processCampaign } = require("../services/campaignProcessor");
+const {
+  processCampaign,
+  pauseCampaign,
+  resumeCampaignState,
+  isCampaignActive,
+} = require("../services/campaignProcessor");
 const { uploadFileToServer } = require("../services/localStorageService");
 const { RATES } = require("./billing");
 const { getIdempotentResponse, saveIdempotentResponse } = require("../services/idempotency");
@@ -419,6 +424,7 @@ router.get("/", async (req, res) => {
     const publicBaseUrl = (process.env.BASE_URL || process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
     const rows = result.rows.map(c => ({
       ...c,
+      is_running: isCampaignActive(c.id) || c.status === "in_progress",
       media_url: (publicBaseUrl && c.media_url) ? c.media_url.replace(/http:\/\/localhost:\d+/g, publicBaseUrl) : c.media_url,
     }));
     res.json(rows);
@@ -493,6 +499,7 @@ router.get("/:id", async (req, res) => {
 
     res.json({
       ...camp,
+      is_running: isCampaignActive(id) || camp.status === "in_progress",
       stats: statsResult.rows,
       sender_breakdown: senderBreakdown.rows,
       total_in_list: totalInList,
@@ -952,6 +959,7 @@ router.post("/:id/resume", async (req, res) => {
     }));
 
     const io = req.app.get("io");
+    resumeCampaignState(campaign.id);
     processCampaign(
       messages,
       campaign.id,
@@ -974,6 +982,36 @@ router.post("/:id/resume", async (req, res) => {
   } catch (err) {
     console.error("❌ Resume campaign error:", err);
     res.status(500).json({ error: "Failed to resume campaign." });
+  }
+});
+
+/**
+ * POST /api/campaigns/:id/pause
+ * Pauses an actively dispatching campaign
+ */
+router.post("/:id/pause", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!isValidUuid(id)) {
+      return res.status(400).json({ error: "Invalid campaign ID format." });
+    }
+
+    pauseCampaign(id);
+    await db.query("UPDATE campaigns SET status = 'paused' WHERE id = $1", [id]);
+
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("campaign_status_changed", { campaignId: id, status: "paused" });
+    }
+
+    return res.json({
+      success: true,
+      message: "Campaign paused successfully.",
+    });
+  } catch (err) {
+    console.error("❌ Pause campaign error:", err);
+    res.status(500).json({ error: "Failed to pause campaign." });
   }
 });
 

@@ -22,6 +22,23 @@ try {
 let campaignQueue = null;
 let campaignWorker = null;
 
+const activeCampaigns = new Set();
+const pausedCampaigns = new Set();
+
+const isCampaignActive = (campaignId) => activeCampaigns.has(String(campaignId));
+
+const pauseCampaign = (campaignId) => {
+  const strId = String(campaignId);
+  pausedCampaigns.add(strId);
+  activeCampaigns.delete(strId);
+};
+
+const resumeCampaignState = (campaignId) => {
+  const strId = String(campaignId);
+  pausedCampaigns.delete(strId);
+  activeCampaigns.add(strId);
+};
+
 const initBullMQ = (io) => {
   if (!bullmqAvailable || process.env.USE_REDIS !== "true") {
     console.log("ℹ️ BullMQ/Redis disabled (set USE_REDIS=true to enable). Using in-memory queue fallback.");
@@ -174,7 +191,14 @@ const processInMemory = async (
   senderPhoneId = null,
   senderPhone = null
 ) => {
-  const DELAY_MS = 2000; 
+  const strCampaignId = String(campaignId);
+  activeCampaigns.add(strCampaignId);
+  pausedCampaigns.delete(strCampaignId);
+
+  await db.query("UPDATE campaigns SET status = 'in_progress' WHERE id = $1", [campaignId]).catch(() => {});
+  if (io) {
+    io.emit("campaign_status_changed", { campaignId, status: "in_progress" });
+  }
 
   const campRes = await db.query("SELECT user_id, name FROM campaigns WHERE id = $1", [campaignId]);
   const campaignOwnerId = campRes.rows[0]?.user_id || null;
@@ -195,6 +219,18 @@ const processInMemory = async (
   }
 
   for (let i = 0; i < messages.length; i++) {
+    // Check if campaign was requested to pause
+    if (pausedCampaigns.has(strCampaignId)) {
+      console.log(`⏸️ Campaign "${campaignName}" (${campaignId}) paused.`);
+      await db.query("UPDATE campaigns SET status = 'paused' WHERE id = $1", [campaignId]).catch(() => {});
+      activeCampaigns.delete(strCampaignId);
+      pausedCampaigns.delete(strCampaignId);
+      if (io) {
+        io.emit("campaign_status_changed", { campaignId, status: "paused" });
+      }
+      return;
+    }
+
     const { to, contactId, bodyParams } = messages[i];
 
     // Check if contact has opted out (STOP)
@@ -365,15 +401,23 @@ const processInMemory = async (
 
     
     if (i < messages.length - 1) {
-      // High-speed optimized pacing: 400ms-700ms dynamic jitter, 2s cooldown every 50 messages
-      if ((i + 1) % 50 === 0) {
-        console.log(`⏸️ Campaign pacing: brief 2s pause after 50 messages (processed ${i + 1}/${messages.length})...`);
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+      // Ultra-fast turbo pacing: 100ms-200ms dynamic jitter (~5-10 msgs/sec), 500ms breather every 100 messages
+      if ((i + 1) % 100 === 0) {
+        console.log(`⚡ Campaign turbo pacing: 500ms breather after 100 messages (processed ${i + 1}/${messages.length})...`);
+        await new Promise((resolve) => setTimeout(resolve, 500));
       } else {
-        const dynamicDelay = 400 + Math.floor(Math.random() * 300);
+        const dynamicDelay = 100 + Math.floor(Math.random() * 100);
         await new Promise((resolve) => setTimeout(resolve, dynamicDelay));
       }
     }
+  }
+
+  // Finished all messages in this run
+  activeCampaigns.delete(strCampaignId);
+  pausedCampaigns.delete(strCampaignId);
+  await db.query("UPDATE campaigns SET status = 'completed' WHERE id = $1", [campaignId]).catch(() => {});
+  if (io) {
+    io.emit("campaign_status_changed", { campaignId, status: "completed" });
   }
 };
 
@@ -432,4 +476,11 @@ const processCampaign = async (
   }
 };
 
-module.exports = { initBullMQ, processCampaign, processInMemory };
+module.exports = {
+  initBullMQ,
+  processCampaign,
+  processInMemory,
+  pauseCampaign,
+  resumeCampaignState,
+  isCampaignActive,
+};
