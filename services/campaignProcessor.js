@@ -365,13 +365,12 @@ const processInMemory = async (
 
     
     if (i < messages.length - 1) {
-      // Periodic anti-surge cooldown every 25 messages
-      if ((i + 1) % 25 === 0) {
-        console.log(`⏸️ Campaign pacing: pausing 7s after 25 messages to maintain healthy Meta quality rating...`);
-        await new Promise((resolve) => setTimeout(resolve, 7000));
+      // High-speed optimized pacing: 400ms-700ms dynamic jitter, 2s cooldown every 50 messages
+      if ((i + 1) % 50 === 0) {
+        console.log(`⏸️ Campaign pacing: brief 2s pause after 50 messages (processed ${i + 1}/${messages.length})...`);
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       } else {
-        // Humanized dynamic jitter between 2500ms and 4000ms
-        const dynamicDelay = 2500 + Math.floor(Math.random() * 1500);
+        const dynamicDelay = 400 + Math.floor(Math.random() * 300);
         await new Promise((resolve) => setTimeout(resolve, dynamicDelay));
       }
     }
@@ -433,4 +432,4 @@ const processCampaign = async (
   }
 };
 
-module.exports = { initBullMQ, processCampaign };
+module.exports = { initBullMQ, processCampaign, processInMemory };
