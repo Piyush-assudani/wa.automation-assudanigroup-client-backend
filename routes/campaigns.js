@@ -202,12 +202,12 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
         [effectiveUserId]
       );
       const balance = parseFloat(userRes.rows[0]?.wallet_balance || 0);
-      const marketingRate = RATES.marketing || 1.08;
-      const requiredCost = Math.round(membersResult.rows.length * marketingRate * 100) / 100;
+      const marketingRate = RATES.marketing || 1.0148;
+      const requiredCost = Math.round(membersResult.rows.length * marketingRate * 10000) / 10000;
 
       if (balance < requiredCost) {
         return res.status(402).json({
-          error: `Insufficient wallet balance. This campaign has ${membersResult.rows.length} recipients requiring ₹${requiredCost.toFixed(2)} (at ₹${marketingRate.toFixed(2)}/marketing message), but your available balance is ₹${balance.toFixed(2)}. Please recharge your wallet before launching.`,
+          error: `Insufficient wallet balance. This campaign has ${membersResult.rows.length} recipients requiring ₹${requiredCost.toFixed(2)} (at ₹${marketingRate}/marketing message), but your available balance is ₹${balance.toFixed(2)}. Please recharge your wallet before launching.`,
           required: requiredCost,
           balance,
         });
@@ -923,8 +923,8 @@ router.post("/:id/resume", async (req, res) => {
     if (effectiveUserId) {
       const userRes = await db.query("SELECT wallet_balance FROM public.users WHERE id = $1", [effectiveUserId]);
       const balance = parseFloat(userRes.rows[0]?.wallet_balance || 0);
-      const marketingRate = RATES.marketing || 1.08;
-      const requiredCost = Math.round(unsent.length * marketingRate * 100) / 100;
+      const marketingRate = RATES.marketing || 1.0148;
+      const requiredCost = Math.round(unsent.length * marketingRate * 10000) / 10000;
 
       if (balance < requiredCost) {
         return res.status(402).json({

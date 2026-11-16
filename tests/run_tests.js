@@ -26,7 +26,7 @@ const state = {
     ],
     [
       VALID_CLIENT_ID,
-      { id: VALID_CLIENT_ID, username: "client_one", role: "client", wallet_balance: "2.16", status: "active" },
+      { id: VALID_CLIENT_ID, username: "client_one", role: "client", wallet_balance: "2.0296", status: "active" },
     ],
   ]),
   idempotencyKeys: new Map(),
@@ -318,12 +318,12 @@ async function run() {
     assert.strictEqual(hugeRecharge.status, 400);
 
     console.log("4. Testing Billing Rates, Concurrent Race-Condition Locks & Idempotency...");
-    assert.strictEqual(RATES.marketing, 1.08);
+    assert.strictEqual(RATES.marketing, 1.0148);
     assert.strictEqual(RATES.utility, 0.45);
     assert.strictEqual(RATES.authentication, 0.40);
     assert.strictEqual(RATES.service, 0.40);
 
-    // Client starts with 2.16 -> 5 parallel deductions of 1.08 must allow exactly 2 and reject 3
+    // Client starts with 2.0296 -> 5 parallel deductions of 1.0148 must allow exactly 2 and reject 3
     const deductions = await Promise.all(
       Array.from({ length: 5 }, (_, idx) =>
         checkAndDeductMessageFund(VALID_CLIENT_ID, {

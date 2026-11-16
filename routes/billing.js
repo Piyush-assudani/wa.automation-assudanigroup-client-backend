@@ -8,10 +8,9 @@ const isValidUuid = (val) =>
   typeof val === "string" &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(val);
 
-// Safe Category Rates (INR / Message) with Platform Margin Buffer
-// Ensures client balance in system is conservative so Meta account always has surplus buffer
+// Safe Category Rates (INR / Message)
 const RATES = {
-  marketing: 1.08, // Meta charges ~₹1.02; ₹1.08 provides safe margin buffer
+  marketing: 1.0148,
   utility: 0.45,
   authentication: 0.40,
   service: 0.40,
@@ -90,7 +89,7 @@ async function checkAndDeductMessageFund(userId, options = {}) {
       };
     }
 
-    const newBalance = Math.round((currentBalance - cost) * 100) / 100;
+    const newBalance = Math.round((currentBalance - cost) * 10000) / 10000;
 
     await client.query(
       "UPDATE public.users SET wallet_balance = $1 WHERE id = $2",
@@ -146,7 +145,7 @@ async function refundMessageFund(userId, txId, reason = "Message Delivery Failed
     }
 
     const tx = txRes.rows[0];
-    const refundAmount = Math.round(parseFloat(tx.amount || 0) * 100) / 100;
+    const refundAmount = Math.round(parseFloat(tx.amount || 0) * 10000) / 10000;
 
     if (refundAmount <= 0) {
       await client.query("UPDATE public.wallet_transactions SET status = 'refunded' WHERE id = $1", [txId]);
@@ -159,7 +158,7 @@ async function refundMessageFund(userId, txId, reason = "Message Delivery Failed
       [userId]
     );
     const currentBalance = parseFloat(userRes.rows[0]?.wallet_balance || 0);
-    const newBalance = Math.round((currentBalance + refundAmount) * 100) / 100;
+    const newBalance = Math.round((currentBalance + refundAmount) * 10000) / 10000;
 
     await client.query("UPDATE public.users SET wallet_balance = $1 WHERE id = $2", [newBalance, userId]);
     await client.query("UPDATE public.wallet_transactions SET status = 'refunded' WHERE id = $1", [txId]);
@@ -282,10 +281,10 @@ router.get("/summary", authenticate, async (req, res) => {
     }
 
     res.json({
-      wallet_balance: Math.round(balance * 100) / 100,
+      wallet_balance: Math.round(balance * 10000) / 10000,
       currency,
       rates: RATES,
-      total_spent: Math.round(totalSpent * 100) / 100,
+      total_spent: Math.round(totalSpent * 10000) / 10000,
       total_messages_sent: totalMessages,
       breakdown: categoryBreakdown,
       is_global_view: !effectiveUserId && isMaster,
@@ -435,7 +434,7 @@ router.post("/recharge", authenticate, requireMasterAdmin, async (req, res) => {
     }
 
     const rawAmount = parseFloat(amount);
-    const adjustAmount = Math.round(rawAmount * 100) / 100;
+    const adjustAmount = Math.round(rawAmount * 10000) / 10000;
     if (!Number.isFinite(adjustAmount) || adjustAmount <= 0 || adjustAmount > 10000000) {
       return res.status(400).json({ error: "Amount must be a positive number up to ₹1,00,00,000." });
     }
@@ -466,16 +465,16 @@ router.post("/recharge", authenticate, requireMasterAdmin, async (req, res) => {
       if (currentBalance < adjustAmount) {
         await clientConn.query("ROLLBACK");
         return res.status(400).json({
-          error: `Cannot deduct ₹${adjustAmount.toFixed(2)}. Client only has ₹${currentBalance.toFixed(2)} available.`,
+          error: `Cannot deduct ₹${adjustAmount.toFixed(4)}. Client only has ₹${currentBalance.toFixed(4)} available.`,
         });
       }
-      newBalance = Math.round((currentBalance - adjustAmount) * 100) / 100;
+      newBalance = Math.round((currentBalance - adjustAmount) * 10000) / 10000;
       txType = "debit";
-      defaultDesc = safeDesc || `Fund deduction by Admin (-₹${adjustAmount.toFixed(2)})`;
+      defaultDesc = safeDesc || `Fund deduction by Admin (-₹${adjustAmount.toFixed(4)})`;
     } else {
-      newBalance = Math.round((currentBalance + adjustAmount) * 100) / 100;
+      newBalance = Math.round((currentBalance + adjustAmount) * 10000) / 10000;
       txType = "credit";
-      defaultDesc = safeDesc || `Wallet recharge by Admin (+₹${adjustAmount.toFixed(2)})`;
+      defaultDesc = safeDesc || `Wallet recharge by Admin (+₹${adjustAmount.toFixed(4)})`;
     }
 
     await clientConn.query("UPDATE public.users SET wallet_balance = $1 WHERE id = $2", [newBalance, user_id]);
