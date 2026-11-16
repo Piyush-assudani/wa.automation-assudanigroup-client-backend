@@ -13,6 +13,37 @@ router.use(authenticate);
 db.query("ALTER TABLE public.users ADD COLUMN IF NOT EXISTS show_billing BOOLEAN DEFAULT true").catch(() => {});
 
 /**
+ * GET /api/users/me
+ * Returns live profile info for the currently logged-in user including show_billing
+ */
+router.get("/me", async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, username, role, parent_client_id, whatsapp_mode, status,
+              meta_display_phone_number, meta_verified_name,
+              COALESCE(show_billing, true) AS show_billing
+       FROM public.users WHERE id = $1`,
+      [req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const u = result.rows[0];
+    return res.json({
+      user: {
+        ...u,
+        show_billing: u.show_billing !== false,
+      },
+    });
+  } catch (err) {
+    console.error("GET /api/users/me error:", err);
+    return res.status(500).json({ error: "Failed to fetch user profile." });
+  }
+});
+
+/**
  * GET /api/users/clients-dropdown
  * Returns active clients & users for Admin switcher dropdown
  */
