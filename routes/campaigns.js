@@ -271,8 +271,8 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
     }
 
     const campaignResult = await db.query(
-      `INSERT INTO campaigns (name, template_name, contact_list_id, media_id, media_type, media_url, total_sent, user_id, scheduled_at, status, sender_channel_id, sender_phone_number_id, sender_phone_number, sender_name)
-       VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9, $10, $11, $12, $13)
+      `INSERT INTO campaigns (name, template_name, contact_list_id, media_id, media_type, media_url, total_sent, user_id, scheduled_at, status, sender_channel_id, sender_phone_number_id, sender_phone_number, sender_name, language_code)
+       VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING *`,
       [
         name.trim().slice(0, 255),
@@ -288,6 +288,7 @@ router.post("/", uploadMedia.single("mediaFile"), async (req, res) => {
         senderPhoneId,
         senderPhone,
         senderName,
+        resolvedLanguageCode,
       ]
     );
     const campaign = campaignResult.rows[0];
@@ -632,24 +633,34 @@ router.post("/:id/retry", async (req, res) => {
 
     const customMetaConfig = await getUserMetaConfig(req);
 
-    // Inspect template to know header/body requirements
+    // Inspect template to know header/body requirements and language
     let mediaType = null;
     let hasBodyParam = false;
+    let resolvedLanguageCode = campaign.language_code || null;
     try {
       const templates = await getTemplates(customMetaConfig);
       const tpl = (templates || []).find((t) => t.name === campaign.template_name);
-      if (tpl?.components) {
-        const headerComponent = tpl.components.find((c) => c.type === "HEADER");
-        if (headerComponent && ["IMAGE", "VIDEO", "DOCUMENT"].includes(headerComponent.format)) {
-          mediaType = headerComponent.format.toLowerCase();
+      if (tpl) {
+        if (tpl.language) {
+          resolvedLanguageCode = tpl.language;
         }
-        const bodyComp = tpl.components.find((c) => c.type === "BODY");
-        if (bodyComp?.text && /\{\{\d+\}\}/.test(bodyComp.text)) {
-          hasBodyParam = true;
+        if (tpl.components) {
+          const headerComponent = tpl.components.find((c) => c.type === "HEADER");
+          if (headerComponent && ["IMAGE", "VIDEO", "DOCUMENT"].includes(headerComponent.format)) {
+            mediaType = headerComponent.format.toLowerCase();
+          }
+          const bodyComp = tpl.components.find((c) => c.type === "BODY");
+          if (bodyComp?.text && /\{\{\d+\}\}/.test(bodyComp.text)) {
+            hasBodyParam = true;
+          }
         }
       }
     } catch (e) {
       console.warn("Could not inspect template for retry:", e.message);
+    }
+
+    if (!resolvedLanguageCode) {
+      resolvedLanguageCode = campaign.language_code || "hi";
     }
 
     // Fallback mediaType from URL
@@ -720,8 +731,8 @@ router.post("/:id/retry", async (req, res) => {
         `INSERT INTO campaigns (
            name, template_name, contact_list_id, media_id, media_type, media_url,
            total_sent, user_id, scheduled_at, status, sender_channel_id,
-           sender_phone_number_id, sender_phone_number, sender_name
-         ) VALUES ($1, $2, $3, $4, $5, $6, 0, $7, NULL, 'completed', $8, $9, $10, $11)
+           sender_phone_number_id, sender_phone_number, sender_name, language_code
+         ) VALUES ($1, $2, $3, $4, $5, $6, 0, $7, NULL, 'in_progress', $8, $9, $10, $11, $12)
          RETURNING *`,
         [
           newCampaignName.slice(0, 255),
@@ -735,6 +746,7 @@ router.post("/:id/retry", async (req, res) => {
           senderPhoneId,
           senderPhone,
           senderName,
+          resolvedLanguageCode,
         ]
       );
       const newCampaign = newCampRes.rows[0];
@@ -756,7 +768,7 @@ router.post("/:id/retry", async (req, res) => {
         retryMessages,
         newCampaign.id,
         newCampaign.template_name,
-        campaign.language_code || "en_US",
+        resolvedLanguageCode,
         io,
         newCampaign.media_id,
         newCampaign.media_type,
@@ -801,12 +813,13 @@ router.post("/:id/retry", async (req, res) => {
       }
 
       try {
+        const configToUse = senderConfig || customMetaConfig;
         const sendRes = await sendTemplateMessage(
           msg.phone_number,
           campaign.template_name,
-          campaign.language_code || "en_US",
+          resolvedLanguageCode,
           components,
-          customMetaConfig
+          configToUse
         );
 
         if (sendRes.success) {
