@@ -373,7 +373,11 @@ router.get("/:id/contacts", async (req, res) => {
           SELECT 1 FROM messages m 
           WHERE m.contact_id = c.id 
           AND m.status = 'failed' 
-          AND m.error_message ILIKE '%undeliverable%'
+          AND (
+            m.error_message ILIKE '%undeliverable%' 
+            OR m.error_message ILIKE '%not on whatsapp%' 
+            OR m.error_message ILIKE '%131026%'
+          )
         )) as not_on_wp
        FROM contact_list_members clm
        JOIN contacts c ON clm.contact_id = c.id
@@ -436,6 +440,87 @@ router.post("/:id/contacts", async (req, res) => {
   } catch (err) {
     console.error("❌ Add contact to list error:", err);
     res.status(500).json({ error: "Failed to add contact to list." });
+  }
+});
+
+/**
+ * DELETE /api/contact_lists/:id/not-on-whatsapp
+ * Bulk delete all contacts marked as 'Not on WhatsApp' (undeliverable) from this contact list
+ */
+router.delete("/:id/not-on-whatsapp", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!isValidUuid(id)) {
+      return res.status(400).json({ error: "Invalid contact list ID format." });
+    }
+
+    // Find all contact IDs in this list that have undeliverable messages
+    const findResult = await db.query(
+      `SELECT DISTINCT c.id, c.phone_number, c.name
+       FROM contact_list_members clm
+       JOIN contacts c ON clm.contact_id = c.id
+       WHERE clm.list_id = $1
+         AND EXISTS (
+           SELECT 1 FROM messages m
+           WHERE m.contact_id = c.id
+             AND m.status = 'failed'
+             AND (
+               m.error_message ILIKE '%undeliverable%'
+               OR m.error_message ILIKE '%not on whatsapp%'
+               OR m.error_message ILIKE '%131026%'
+             )
+         )`,
+      [id]
+    );
+
+    const contactIds = findResult.rows.map((r) => r.id);
+
+    if (contactIds.length === 0) {
+      return res.json({
+        success: true,
+        message: "No 'Not on WhatsApp' contacts found in this list.",
+        deleted_count: 0,
+      });
+    }
+
+    // Remove them from this contact list
+    await db.query(
+      `DELETE FROM contact_list_members
+       WHERE list_id = $1 AND contact_id = ANY($2::uuid[])`,
+      [id, contactIds]
+    );
+
+    // Also remove contacts that have no remaining contact list associations and delete their messages
+    await db.query(
+      `DELETE FROM messages
+       WHERE contact_id = ANY($1::uuid[])
+         AND contact_id NOT IN (SELECT contact_id FROM contact_list_members)`,
+      [contactIds]
+    ).catch(() => {});
+
+    const deletedContacts = await db.query(
+      `DELETE FROM contacts
+       WHERE id = ANY($1::uuid[])
+         AND id NOT IN (SELECT contact_id FROM contact_list_members)
+       RETURNING id`,
+      [contactIds]
+    ).catch(() => ({ rowCount: 0 }));
+
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("contact_list_updated", { id, deleted_count: contactIds.length });
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully removed ${contactIds.length} 'Not on WhatsApp' contacts from this list.`,
+      deleted_count: contactIds.length,
+      purged_contacts: deletedContacts.rowCount || 0,
+    });
+  } catch (err) {
+    console.error("❌ Bulk delete not-on-whatsapp error:", err);
+    res.status(500).json({ error: "Failed to delete 'Not on WhatsApp' contacts." });
   }
 });
 
