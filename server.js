@@ -274,6 +274,7 @@ startCampaignScheduler(io);
 
 // Ensure TEXT capacity & RBAC/Index schema on startup
 db.query(`
+  ALTER TABLE public.users ADD COLUMN IF NOT EXISTS show_billing BOOLEAN DEFAULT true;
   ALTER TABLE messages ALTER COLUMN media_url TYPE TEXT;
   ALTER TABLE campaigns ALTER COLUMN media_url TYPE TEXT;
 `)

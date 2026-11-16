@@ -202,6 +202,13 @@ router.get("/summary", authenticate, async (req, res) => {
     const targetClientId = req.headers["x-client-id"] || req.query.client_id;
     const effectiveUserId = targetClientId || (!isMaster ? req.user?.id : null);
 
+    if (!isMaster) {
+      const uRes = await db.query("SELECT show_billing FROM public.users WHERE id = $1", [req.user?.id]);
+      if (uRes.rows[0] && uRes.rows[0].show_billing === false) {
+        return res.status(403).json({ error: "Billing dashboard is disabled for this account." });
+      }
+    }
+
     let balance = 0;
     let currency = "INR";
     let totalSpent = 0;
@@ -216,7 +223,7 @@ router.get("/summary", authenticate, async (req, res) => {
     if (effectiveUserId) {
       // Specific client view
       const userRes = await db.query(
-        "SELECT id, username, wallet_balance, currency, per_msg_rate FROM public.users WHERE id = $1",
+        "SELECT id, username, wallet_balance, currency, per_msg_rate, show_billing FROM public.users WHERE id = $1",
         [effectiveUserId]
       );
 
@@ -225,6 +232,9 @@ router.get("/summary", authenticate, async (req, res) => {
       }
 
       const user = userRes.rows[0];
+      if (!isMaster && user.show_billing === false) {
+        return res.status(403).json({ error: "Billing dashboard is disabled for this account." });
+      }
       balance = parseFloat(user.wallet_balance || 0);
       currency = user.currency || "INR";
 
@@ -305,6 +315,13 @@ router.get("/transactions", authenticate, async (req, res) => {
     const isMaster = req.user?.role === "master_admin" || (req.user?.username && req.user.username.toLowerCase() === "piyushassudani");
     const targetClientId = req.headers["x-client-id"] || req.query.client_id;
     const effectiveUserId = targetClientId || (!isMaster ? req.user?.id : null);
+
+    if (!isMaster) {
+      const uRes = await db.query("SELECT show_billing FROM public.users WHERE id = $1", [req.user?.id]);
+      if (uRes.rows[0] && uRes.rows[0].show_billing === false) {
+        return res.status(403).json({ error: "Billing dashboard is disabled for this account." });
+      }
+    }
     const { category, type, search, limit = 50, offset = 0 } = req.query;
 
     let whereClauses = [];

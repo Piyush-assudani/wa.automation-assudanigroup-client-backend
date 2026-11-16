@@ -60,6 +60,7 @@ router.post("/login", async (req, res) => {
         role: user.role,
         parent_client_id: user.parent_client_id || null,
         whatsapp_mode: user.whatsapp_mode || "company",
+        show_billing: user.show_billing !== false,
       },
       JWT_SECRET,
       { expiresIn: "30d" }
@@ -76,6 +77,7 @@ router.post("/login", async (req, res) => {
         whatsapp_mode: user.whatsapp_mode || "company",
         meta_display_phone_number: user.meta_display_phone_number || null,
         has_personal_meta: !!(user.meta_phone_number_id && user.meta_access_token),
+        show_billing: user.show_billing !== false,
       },
     });
   } catch (error) {

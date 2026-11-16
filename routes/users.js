@@ -9,6 +9,9 @@ const { getAccountHealth } = require("../services/metaApi");
 // All routes require authentication
 router.use(authenticate);
 
+// Ensure show_billing column exists
+db.query("ALTER TABLE public.users ADD COLUMN IF NOT EXISTS show_billing BOOLEAN DEFAULT true").catch(() => {});
+
 /**
  * GET /api/users/clients-dropdown
  * Returns active clients & users for Admin switcher dropdown
@@ -408,6 +411,7 @@ router.get("/", requireMasterAdmin, async (req, res) => {
         raw_password,
         wallet_balance,
         currency,
+        COALESCE(show_billing, true) as show_billing,
         created_at 
       FROM public.users 
       ORDER BY 
@@ -439,6 +443,7 @@ router.post("/", requireMasterAdmin, async (req, res) => {
     meta_phone_number_id,
     meta_waba_id,
     meta_access_token,
+    show_billing = true,
   } = req.body || {};
 
   const cleanUser = username?.trim();
@@ -495,9 +500,10 @@ router.post("/", requireMasterAdmin, async (req, res) => {
         meta_display_phone_number,
         status,
         created_by,
-        wallet_balance
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active', $12, 0.00)
-      RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_display_phone_number, raw_password, created_at;
+        wallet_balance,
+        show_billing
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active', $12, 0.00, $13)
+      RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_display_phone_number, raw_password, COALESCE(show_billing, true) as show_billing, created_at;
     `, [
       cleanUser,
       hashedPassword,
@@ -511,6 +517,7 @@ router.post("/", requireMasterAdmin, async (req, res) => {
       verifiedName,
       displayPhone,
       req.user.username,
+      show_billing !== false,
     ]);
 
     return res.status(201).json({
@@ -539,6 +546,7 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
     meta_waba_id,
     meta_access_token,
     wallet_balance,
+    show_billing,
     status = "active",
   } = req.body || {};
 
@@ -598,6 +606,7 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
     const finalAccessToken = meta_access_token && meta_access_token.trim() !== "" ? meta_access_token.trim() : current.meta_access_token;
     const finalStatus = status !== undefined && status !== null ? status : (current.status || "active");
     const finalBalance = wallet_balance !== undefined && !isNaN(parseFloat(wallet_balance)) ? parseFloat(wallet_balance) : (parseFloat(current.wallet_balance) || 0);
+    const finalShowBilling = show_billing !== undefined ? (show_billing === true || show_billing === "true") : (current.show_billing !== false);
 
     const updateResult = await db.query(`
       UPDATE public.users SET
@@ -613,9 +622,10 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
         meta_verified_name = $10,
         meta_display_phone_number = $11,
         status = $12,
-        wallet_balance = $13
-      WHERE id = $14
-      RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_phone_number_id, meta_waba_id, meta_access_token, meta_display_phone_number, meta_verified_name, status, raw_password, wallet_balance, currency;
+        wallet_balance = $13,
+        show_billing = $14
+      WHERE id = $15
+      RETURNING id, username, role, parent_client_id, whatsapp_mode, meta_phone_number_id, meta_waba_id, meta_access_token, meta_display_phone_number, meta_verified_name, status, raw_password, wallet_balance, currency, COALESCE(show_billing, true) as show_billing;
     `, [
       finalUsername,
       finalPassword,
@@ -630,8 +640,22 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
       displayPhone,
       finalStatus,
       finalBalance,
+      finalShowBilling,
       id,
     ]);
+
+    // Real-time instant propagation via Socket.io
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("billing_visibility_changed", {
+        user_id: id,
+        show_billing: finalShowBilling,
+      });
+      io.emit("user_updated", {
+        id,
+        show_billing: finalShowBilling,
+      });
+    }
 
     // If balance was modified directly, log an admin adjustment transaction
     if (wallet_balance !== undefined && !isNaN(parseFloat(wallet_balance)) && parseFloat(wallet_balance) !== parseFloat(current.wallet_balance || 0)) {
@@ -657,6 +681,59 @@ router.put("/:id", requireMasterAdmin, async (req, res) => {
   } catch (err) {
     console.error("Update user error:", err);
     return res.status(500).json({ error: "Failed to update user: " + err.message });
+  }
+});
+
+/**
+ * PATCH /api/users/:id/billing-visibility
+ * Toggle billing dashboard visibility for a client in real-time (Master Admin only)
+ */
+router.patch("/:id/billing-visibility", requireMasterAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { show_billing } = req.body || {};
+
+    if (!isValidUuid(id)) {
+      return res.status(400).json({ error: "Invalid user ID format." });
+    }
+
+    const isEnabled = show_billing === true || show_billing === "true";
+
+    const result = await db.query(
+      `UPDATE public.users 
+       SET show_billing = $1 
+       WHERE id = $2 
+       RETURNING id, username, role, COALESCE(show_billing, true) as show_billing`,
+      [isEnabled, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    const updatedUser = result.rows[0];
+
+    // Real-time instant propagation via Socket.io
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("billing_visibility_changed", {
+        user_id: id,
+        show_billing: isEnabled,
+      });
+      io.emit("user_updated", {
+        id,
+        show_billing: isEnabled,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: `Billing dashboard ${isEnabled ? "enabled" : "hidden"} for client "${updatedUser.username}".`,
+      user: updatedUser,
+    });
+  } catch (err) {
+    console.error("Toggle billing visibility error:", err);
+    return res.status(500).json({ error: "Failed to update billing visibility." });
   }
 });
 

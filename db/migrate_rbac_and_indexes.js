@@ -35,7 +35,8 @@ async function runRbacAndIndexMigration() {
     );
 
     ALTER TABLE public.users
-      ADD COLUMN IF NOT EXISTS role_id UUID REFERENCES public.roles(id) ON DELETE SET NULL;
+      ADD COLUMN IF NOT EXISTS role_id UUID REFERENCES public.roles(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS show_billing BOOLEAN DEFAULT true;
 
     -- Seed Core Roles (Owner/Master Admin, Manager/Client, Clerk/Staff, Teacher/Viewer)
     INSERT INTO public.roles (name, display_name, description) VALUES
